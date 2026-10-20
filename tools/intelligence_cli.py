@@ -6,7 +6,7 @@ facade (``load_recipe``, ``run_recipe``, ``default_runner``) - the same three na
 services layer would use. Install the package first (``uv pip install -e .``).
 
     python tools/intelligence_cli.py run     --recipe configs/train_iris.yaml
-    python tools/intelligence_cli.py inspect --recipe configs/iris_demo.yaml
+    python tools/intelligence_cli.py inspect --recipe configs/iris_dag.yaml
     python tools/intelligence_cli.py list-components --model random_forest
 """
 from __future__ import annotations
@@ -26,8 +26,8 @@ examples:
   %(prog)s run --recipe configs/train_iris.yaml          train (grid search when a param is a list)
   %(prog)s run --recipe configs/test_iris.yaml           score the recorded holdout of the latest model
   %(prog)s run --recipe configs/eval_iris.yaml           k-fold comparison of candidate models
-  %(prog)s run --recipe configs/iris_demo.yaml           multi-section DAG: train -> test, eval
-  %(prog)s inspect --recipe configs/iris_demo.yaml       validate + show execution order (+ PNG)
+  %(prog)s run --recipe configs/iris_dag.yaml           multi-section DAG: train -> test, eval
+  %(prog)s inspect --recipe configs/iris_dag.yaml       validate + show execution order (+ PNG)
   %(prog)s list-components --model random_forest         what you may put in a recipe
 
 recipe skeleton (block-style YAML; every section has a `type`):

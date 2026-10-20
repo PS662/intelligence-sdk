@@ -10,12 +10,13 @@ Scope is deliberately small (numeric tabular data, scikit-learn); the design is 
 
 ```bash
 uv pip install -e ".[dev]"                 # or: pip install -e ".[dev]"
+python tools/make_iris_csv.py              # sample data is not committed; this writes data/iris.csv
 
-python tools/intelligence_cli.py inspect --recipe configs/iris_demo.yaml   # validate + DAG, no run
+python tools/intelligence_cli.py inspect --recipe configs/iris_dag.yaml   # validate + DAG, no run
 python tools/intelligence_cli.py run     --recipe configs/train_iris.yaml  # train with grid search
 python tools/intelligence_cli.py run     --recipe configs/test_iris.yaml   # score the recorded holdout
 python tools/intelligence_cli.py run     --recipe configs/eval_iris.yaml   # k-fold model comparison
-python tools/intelligence_cli.py run     --recipe configs/iris_demo.yaml   # 4-section DAG, end to end
+python tools/intelligence_cli.py run     --recipe configs/iris_dag.yaml   # 4-section DAG, end to end
 python tools/intelligence_cli.py list-components --model random_forest     # what a recipe may name
 pytest
 ```
@@ -25,7 +26,7 @@ From Python the whole public surface is three names:
 ```python
 from intelligence_sdk import load_recipe, run_recipe, default_runner
 
-outputs = run_recipe("configs/iris_demo.yaml")          # {section_name: SectionOutput}
+outputs = run_recipe("configs/iris_dag.yaml")          # {section_name: SectionOutput}
 outputs["train_rf"].run_dir, outputs["test_rf"].metrics
 ```
 
@@ -95,7 +96,7 @@ edges mean**: only explicit edges carry model/dataset inheritance, so a standalo
 with a `model_path` can sit after a train section without inheriting from it.
 `inspect` validates the DAG, components and metric compatibility and draws it:
 
-![iris_demo DAG](configs/iris_demo.dag.png)
+![iris_dag DAG](configs/iris_dag.dag.png)
 
 ### Where a test gets its model and data
 
@@ -170,8 +171,8 @@ handler in the runner. `default_runner()` is the batteries-included assembly;
 ## Repo layout
 
 ```
-configs/    train_iris.yaml  test_iris.yaml  eval_iris.yaml  iris_demo.yaml
-data/       iris.csv
+configs/    train_iris.yaml  test_iris.yaml  eval_iris.yaml  iris_dag.yaml
+data/       sample csv files, git-ignored; `tools/make_iris_csv.py` regenerates iris.csv
 tests/      recipe validation, DAG semantics, splits, golden iris runs, edge cases, CLI
 artifacts/  created by runs: <section>/<run_id>/ with a `latest` pointer per section
 ```

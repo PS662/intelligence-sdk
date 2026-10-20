@@ -1,6 +1,6 @@
 # Multi-section recipe: a DAG of train -> test, test-on-new-data, eval.
 # Sections run in topological order; explicit depends_on carries meaning,
-# listing order only breaks ties.  Try: inspect --recipe configs/iris_demo.yaml
+# listing order only breaks ties.  Try: inspect --recipe configs/iris_dag.yaml
 
 datasets:
   iris_1:

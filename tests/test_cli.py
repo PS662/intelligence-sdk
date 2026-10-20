@@ -27,7 +27,7 @@ def test_no_command_prints_help_and_exits_2(cli, capsys):
 
 def test_inspect_validates_without_running(cli, capsys, tmp_path):
     png = tmp_path / "dag.png"
-    assert cli.main(["inspect", "--recipe", str(ROOT / "configs" / "iris_demo.yaml"), "--png", str(png)]) == 0
+    assert cli.main(["inspect", "--recipe", str(ROOT / "configs" / "iris_dag.yaml"), "--png", str(png)]) == 0
     out = capsys.readouterr().out
     assert "train_rf" in out and "DAG ok" in out
     assert png.exists()
@@ -41,7 +41,7 @@ def test_recipe_error_is_one_message_no_traceback(cli, capsys, tmp_path):
     assert "recipe error" in err and "t.type" in err and "Traceback" not in err
 
 
-def test_run_demo_recipe(cli, capsys, caplog, tmp_path):
+def test_run_train_recipe(cli, capsys, caplog, tmp_path):
     import logging
 
     caplog.set_level(logging.INFO, logger="intelligence_sdk")  # pytest owns the root logger; the CLI's basicConfig is a no-op here

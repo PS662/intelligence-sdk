@@ -243,3 +243,15 @@ def test_resolve_rejects_missing_file_and_model(artifacts):
     recipe2 = parse_recipe({"t": {"type": "test", "model_path": str(artifacts / "none" / "latest")}})
     with pytest.raises(RecipeError, match="t.model_path: no trained model"):
         default_runner().resolve(recipe2)
+
+
+def test_generated_csv_matches_library_loader_columns(iris_path):
+    """tools/make_iris_csv.py and the library loader must agree, so file and library
+    recipes on iris see identical features."""
+    from intelligence_sdk.adapters.loaders.library import LibraryLoader
+    from intelligence_sdk.core.recipe import parse_dataset_def
+
+    lib = LibraryLoader().load(parse_dataset_def({"source": "library", "name": "iris", "target": "species"}))
+    csv = pd.read_csv(iris_path)
+    assert list(csv.columns) == list(lib.frame.columns)
+    assert len(csv) == len(lib.frame)

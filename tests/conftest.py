@@ -1,11 +1,27 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 IRIS = REPO / "data" / "iris.csv"
+
+
+def _ensure_iris() -> Path:
+    """Sample data is git-ignored; generate it on first use."""
+    if not IRIS.exists():
+        sys.path.insert(0, str(REPO / "tools"))
+        from make_iris_csv import write_iris_csv
+
+        write_iris_csv(IRIS)
+    return IRIS
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _iris_file() -> Path:
+    return _ensure_iris()
 
 
 @pytest.fixture
