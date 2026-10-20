@@ -1,0 +1,29 @@
+# Train a classifier on iris with a small grid search.
+# A list-valued hyperparameter triggers the search; scalars are fixed.
+
+datasets:
+  iris_1:
+    source: file
+    path: data/iris.csv
+    target: species
+    # filter:                               # optional, definition-level row filter
+    #   exclude: data/outliers.csv          # a one-column csv of ids, or an inline list
+
+train_rf:
+  type: train
+  datasets:
+    - dataset_name: iris_1                  # registry reference (typo -> did-you-mean)
+  split:                                    # the split is an artifact: recorded, never recomputed
+    test_size: 0.2
+    stratify: true
+  seed: 42
+  pipeline:
+    - step: standard_scaler
+  model:
+    name: random_forest
+    params:
+      n_estimators: [20, 50]                # list -> grid search
+      max_depth: 3                          # scalar -> fixed
+  search:
+    cv: 3
+    scoring: accuracy

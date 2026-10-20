@@ -1,0 +1,52 @@
+# Multi-section recipe: a DAG of train -> test, test-on-new-data, eval.
+# Sections run in topological order; explicit depends_on carries meaning,
+# listing order only breaks ties.  Try: inspect --recipe configs/iris_demo.yaml
+
+datasets:
+  iris_1:
+    source: file
+    path: data/iris.csv
+    target: species
+
+train_rf:
+  type: train
+  datasets:
+    - dataset_name: iris_1
+  split:
+    test_size: 0.2
+    stratify: true
+  seed: 42
+  pipeline:
+    - step: standard_scaler
+  model:
+    name: random_forest
+    params:
+      n_estimators: [20, 50]
+
+test_rf:
+  type: test
+  depends_on: [train_rf]                    # explicit: model AND dataset inherited
+  rows: holdout
+
+test_new_data:
+  type: test
+  depends_on: [train_rf]                    # model inherited; dataset explicit -> rows: all, never refused
+  datasets:
+    - dataset:
+        source: file
+        path: data/iris.csv
+        target: species
+      save: true                            # persist the materialized frame into the run dir
+
+compare:
+  type: eval
+  depends_on: [train_rf]                    # ordering only
+  datasets:
+    - dataset_name: iris_1
+  folds: 5
+  seed: 42
+  pipeline:
+    - step: standard_scaler
+  candidates:
+    - name: random_forest
+    - name: logistic_regression

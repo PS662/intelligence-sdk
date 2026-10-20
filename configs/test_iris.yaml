@@ -1,0 +1,8 @@
+# Score a trained model on the holdout rows recorded when it was trained.
+# No datasets block = the dataset is inherited from the model's dataset.json and its
+# hash must match (leakage guard). Run configs/train_iris.yaml first.
+
+test_rf:
+  type: test
+  model_path: artifacts/train_rf/latest     # symlink to the most recent train_rf run
+  rows: holdout                             # default when the dataset is inherited
