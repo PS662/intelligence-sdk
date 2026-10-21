@@ -1,20 +1,25 @@
 # intelligence-sdk
-# All targets use the virtualenv in VENV; override with `make VENV=/path/to/venv <target>`.
+# Every target runs inside the virtualenv VENV (created by uv on demand).
+# Override with `make VENV=/path/to/venv PYTHON=3.12 <target>`.
 
 VENV    ?= $(HOME)/.virtualenvs/intelligence-sdk-venv
 PY      := $(VENV)/bin/python
 UV      ?= uv
-CLI     := $(PY) tools/intelligence_cli.py
+PYTHON  ?= 3.12
+CLI     := $(VENV)/bin/intelligence-sdk
 
-.PHONY: help install install-dev data test lint format docs inspect run-train run-test run-eval run-dag clean
+.PHONY: help venv install install-dev data test lint format docs inspect run-train run-test run-eval run-dag clean
 
 help:            ## list targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
-install:         ## install the package into the venv
+venv:            ## create the venv with uv if it does not exist
+	@test -x $(PY) || $(UV) venv $(VENV) --python $(PYTHON)
+
+install: venv    ## install the package and the intelligence-sdk command into the venv
 	$(UV) pip install --python $(PY) .
 
-install-dev:     ## editable install with test/lint/docs extras
+install-dev: venv ## editable install with test/lint/docs extras
 	$(UV) pip install --python $(PY) -e ".[dev]"
 
 data:            ## regenerate data/iris.csv (sample data is not committed)

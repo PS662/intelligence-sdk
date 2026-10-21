@@ -24,10 +24,17 @@ dev = ["pytest>=8.0", "matplotlib>=3.8", "ruff>=0.6", "pdoc>=14"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# Only the SDK package is distributed. tools/ (the CLI) is a consumer of the
-# package, not part of it - the same relationship a services layer would have.
+[project.scripts]
+intelligence-sdk = "intelligence_cli:main"
+
+# The SDK package plus the CLI. The CLI stays in tools/ as a consumer of the public
+# facade, but ships in the wheel as a top-level module so `intelligence-sdk` runs in
+# any venv the package is installed into.
 [tool.hatch.build.targets.wheel]
-packages = ["intelligence_sdk"]
+only-include = ["intelligence_sdk", "tools/intelligence_cli.py"]
+
+[tool.hatch.build.targets.wheel.sources]
+"tools" = ""
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

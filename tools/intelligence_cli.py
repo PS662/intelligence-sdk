@@ -139,7 +139,6 @@ def cmd_list_components(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="intelligence_cli.py",
         description="Build simple ML models from a YAML recipe: one file describes datasets, preprocessing, model and what to do (train / test / eval).",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,

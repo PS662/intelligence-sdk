@@ -10,7 +10,7 @@ core, registry-owned component names, and errors that teach.
 ## Quickstart
 
 ```bash
-make install-dev                 # editable install with test/lint/docs extras
+make install-dev                 # creates the venv with uv if needed; editable install with dev extras
 make data                        # sample data is not committed; writes data/iris.csv
 make run-train                   # train on iris, grid search when a param is a list
 make run-test                    # score the latest model on its recorded holdout rows
@@ -57,7 +57,7 @@ test_rf:
   depends_on: [train_rf]       # names the model source; holdout rows, dataset hash checked
 ```
 
-`python tools/intelligence_cli.py list-components` prints every name a recipe may use.
+`intelligence-sdk list-components` prints every name a recipe may use.
 
 ## Architecture
 
@@ -68,20 +68,20 @@ intelligence_sdk/
   core/             domain: recipe schema, registry enums, DAG, splits, filters, runner
   adapters/         loaders/ (csv, library), sklearn_backend, local_artifacts, evaluator, dag_render
   runtime/          provider registry + build_runner: the runtime block -> a wired Runner
-tools/              CLI and sample-data script; consumers of the facade, not distributed
+tools/              CLI (installed as the `intelligence-sdk` command) and sample-data script; consumers of the facade
 configs/ data/ docs/ tests/
 ```
 
 Imports flow one way: `tools → facade → runtime → {core, adapters} → interfaces → core/types`.
 `core` never imports an adapter; `runtime/providers.py` is the only module that names one.
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the diagram, the recipe model and
-where this sits in the larger toolkit I would build around it.
+the toolkit this SDK is one layer of.
 
 ## Makefile
 
 | target | what it does |
 |--------|--------------|
-| `install`, `install-dev` | normal install / editable install with dev extras |
+| `venv`, `install`, `install-dev` | create the venv with uv; install the package and the `intelligence-sdk` command; editable install with dev extras |
 | `data` | regenerate `data/iris.csv` |
 | `test`, `lint`, `format` | pytest; ruff check + format check; apply ruff |
 | `docs` | API docs from docstrings into `docs/api/` (pdoc) |

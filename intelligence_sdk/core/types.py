@@ -31,11 +31,11 @@ class EstimatorKind(StrEnum):
 
 @dataclass(frozen=True)
 class DatasetVersion:
-    """Identity of the data a model was trained on.
+    """Identity of the data a model was trained on: a content hash plus provenance.
 
-    In a real system this hash would be an MD5 stored and managed behind DVC; a test
-    run against a different version is reported as leakage. Here we compute it on the
-    fly from the raw file bytes (file source) or the canonical frame (library source).
+    The loader computes it - file bytes for csv, the canonical frame for library
+    datasets - and a loader backed by a dataset registry such as DVC supplies the hash
+    it already stores. A test run against a different hash is reported as leakage.
     """
 
     source: str

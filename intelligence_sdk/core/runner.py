@@ -47,9 +47,10 @@ log = logging.getLogger("intelligence_sdk")
 
 DATASET_JSON = "dataset.json"
 MODEL_JSON = "model.json"
-DVC_NOTE = (
-    "Dataset identity is a content hash. In a production system this would be the MD5 "
-    "stored and managed behind DVC; a test run against a different hash is reported as leakage."
+DATASET_NOTE = (
+    "Dataset identity is a content hash computed by the loader (file bytes or canonical frame); "
+    "a loader backed by a dataset registry such as DVC supplies its stored hash instead. "
+    "A test run against a different hash is reported as leakage."
 )
 
 
@@ -304,7 +305,7 @@ class Runner:
         }
         self.backend.save(est, run_dir, model_meta)
         dataset_json = {
-            "_note": DVC_NOTE,
+            "_note": DATASET_NOTE,
             **record,
             "id_column": getattr(recipe.resolve_dataset(ref, name), "id_column", None),
             "target": dataset.target,
@@ -464,7 +465,7 @@ class Runner:
             self.store.write_csv(run_dir, "predictions.csv", pred.frame)
         self.store.write_json(run_dir, "metrics.json", metrics)
         dataset_json = {
-            "_note": DVC_NOTE,
+            "_note": DATASET_NOTE,
             "scored": {
                 **record,
                 "rows": rows,
@@ -543,7 +544,7 @@ class Runner:
         self.store.write_json(
             run_dir,
             DATASET_JSON,
-            {"_note": DVC_NOTE, **record, "target": dataset.target, "features": dataset.feature_columns},
+            {"_note": DATASET_NOTE, **record, "target": dataset.target, "features": dataset.feature_columns},
         )
         metrics = {"ranked_by": primary, "summary": summary.to_dict(orient="records")}
         self.store.write_json(run_dir, "metrics.json", metrics)

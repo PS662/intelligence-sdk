@@ -1,7 +1,5 @@
-"""``source: file`` loader. Version = MD5 of the raw bytes.
-
-In a real system this hash would be stored and managed behind DVC; here we recompute
-it on every load and the runner compares it with what the model recorded.
+"""``source: file`` loader. Version = MD5 of the raw bytes, recomputed on every load
+and compared by the runner with what the model recorded.
 """
 
 from __future__ import annotations
