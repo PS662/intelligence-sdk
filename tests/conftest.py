@@ -49,3 +49,27 @@ def train_block(dataset_name: str = "iris", model: str = "random_forest", params
     }
     block.update(extra)
     return block
+
+
+# ---- compact per-file summary at the end of a run -------------------------------
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    counts: dict[str, dict[str, int]] = {}
+    for outcome in ("passed", "failed", "skipped", "error"):
+        for report in terminalreporter.stats.get(outcome, []):
+            if outcome in ("passed", "failed") and getattr(report, "when", "call") != "call":
+                continue
+            module = report.nodeid.split("::")[0]
+            counts.setdefault(module, {})[outcome] = counts.setdefault(module, {}).get(outcome, 0) + 1
+    if not counts:
+        return
+    terminalreporter.write_sep("-", "test summary")
+    width = max(len(m) for m in counts) + 2
+    totals: dict[str, int] = {}
+    for module in sorted(counts):
+        parts = [f"{n} {k}" for k, n in counts[module].items()]
+        terminalreporter.write_line(f"  {module:<{width}}{', '.join(parts)}")
+        for k, n in counts[module].items():
+            totals[k] = totals.get(k, 0) + n
+    terminalreporter.write_line(f"  {'total':<{width}}{', '.join(f'{n} {k}' for k, n in totals.items())}")

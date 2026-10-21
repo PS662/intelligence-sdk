@@ -1,7 +1,7 @@
 # Architecture
 
 A recipe is validated completely before any data is read, then executed section by
-section in topological order. Each section leaves a provenance bundle and hands a
+section in topological order. Each section leaves a run card and hands a
 `SectionOutput` to its dependants.
 
 ## Overview

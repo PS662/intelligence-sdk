@@ -31,7 +31,7 @@ class EstimatorKind(StrEnum):
 
 @dataclass(frozen=True)
 class DatasetVersion:
-    """Identity of the data a model was trained on: a content hash plus provenance.
+    """Identity of the data a model was trained on: a content hash plus origin details.
 
     The loader computes it - file bytes for csv, the canonical frame for library
     datasets - and a loader backed by a dataset registry such as DVC supplies the hash
@@ -43,7 +43,7 @@ class DatasetVersion:
     hash: str
     n_rows: int
     columns: list[str]
-    provenance: dict[str, Any] = field(default_factory=dict)
+    origin: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,7 +52,7 @@ class DatasetVersion:
             "hash": self.hash,
             "n_rows": self.n_rows,
             "columns": list(self.columns),
-            "provenance": dict(self.provenance),
+            "origin": dict(self.origin),
         }
 
 

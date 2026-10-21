@@ -46,7 +46,7 @@ class CsvLoader(DataLoader):
             hash=digest,
             n_rows=len(frame),
             columns=[str(c) for c in frame.columns],
-            provenance={"hash_algorithm": "md5", "bytes": len(raw)},
+            origin={"hash_algorithm": "md5", "bytes": len(raw)},
         )
         frame = apply_filter(frame, definition.filter, "dataset.filter")
         target = definition.target if definition.target in frame.columns else None

@@ -1,7 +1,7 @@
 """``source: library`` loader for scikit-learn's bundled datasets.
 
 Version = MD5 of the canonically serialized frame (sorted columns, no index), with
-the library version recorded as provenance. Same contract as the CSV loader, so the
+the library version recorded as origin. Same contract as the CSV loader, so the
 runner never knows which source it is looking at.
 """
 
@@ -47,7 +47,7 @@ class LibraryLoader(DataLoader):
             hash=digest,
             n_rows=len(frame),
             columns=[str(c) for c in frame.columns],
-            provenance={
+            origin={
                 "hash_algorithm": "md5(canonical csv)",
                 "library": "scikit-learn",
                 "library_version": sklearn.__version__,

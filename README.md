@@ -3,7 +3,7 @@
 A config-driven way to build simple ML models. One YAML recipe names the datasets, the
 preprocessing steps, the model and what to do with it (train, test, eval); the SDK
 validates the whole recipe before it reads a row, runs the sections as a DAG, and
-leaves a reproducible provenance bundle per run. I kept the scope small on purpose
+leaves a reproducible run card per run. I kept the scope small on purpose
 (numeric tabular data, scikit-learn) and spent the effort on the design: a hexagonal
 core, registry-owned component names, and errors that teach.
 

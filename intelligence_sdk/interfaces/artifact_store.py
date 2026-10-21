@@ -8,7 +8,7 @@ import pandas as pd
 
 
 class ArtifactStore(ABC):
-    """Where runs leave their provenance bundle. Implemented by a local directory
+    """Where runs leave their run card. Implemented by a local directory
     store; an object store would be another subclass."""
 
     @abstractmethod

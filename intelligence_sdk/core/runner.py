@@ -5,7 +5,7 @@ Two phases:
 1. **resolve** - everything that can be checked without touching data: DAG validity,
    dataset references, component names, hyperparameter names, metric/model
    compatibility, file existence. Any failure raises before a single row is read.
-2. **execute** - sections in topological order. Each leaves a provenance bundle in
+2. **execute** - sections in topological order. Each leaves a run card in
    its run directory and a ``SectionOutput`` for its dependants.
 
 The runner depends on the ports only; ``runtime.build_runner`` supplies the
