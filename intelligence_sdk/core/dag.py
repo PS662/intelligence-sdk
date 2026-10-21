@@ -2,17 +2,16 @@
 
 Two kinds of edges:
 
-* **explicit** - from ``depends_on``. These carry meaning: a test section's explicit
-  dependency names its model (and, when it has no ``datasets`` block, its dataset).
-* **implicit** - a section with no ``depends_on`` (and not listed first) is chained
-  after the previously listed section. These only order execution.
+* explicit - from ``depends_on``. A test section's explicit dependency names its
+  model and, when it has no ``datasets`` block, its dataset.
+* implicit - a section without ``depends_on`` (and not listed first) runs after the
+  previously listed section. Implicit edges only order execution; the model-source
+  rule and all inheritance consider explicit edges, so a standalone test with a
+  ``model_path`` may be listed after a train section.
 
-"Implicit edges order, explicit edges mean." The test XOR rule, the exactly-one-train
-check and all inheritance look at explicit edges only, so a standalone test with a
-``model_path`` listed after a train section is still valid.
-
-Listing order is load-bearing for both chaining and topological tie-breaks.
+Listing order decides implicit chaining and breaks topological ties.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass

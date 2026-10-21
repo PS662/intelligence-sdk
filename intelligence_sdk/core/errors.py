@@ -1,6 +1,7 @@
 """User-facing errors. Every error names the config path that failed and, where we
 can compute one, a did-you-mean suggestion. The CLI prints these on one line and
 never shows a traceback for them."""
+
 from __future__ import annotations
 
 import difflib

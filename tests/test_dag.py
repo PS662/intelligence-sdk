@@ -1,4 +1,5 @@
 """Implicit edges order, explicit edges mean."""
+
 from __future__ import annotations
 
 import pytest
@@ -17,7 +18,7 @@ def test_single_node_recipe():
 
 
 def test_implicit_chaining_follows_yaml_listing_order():
-    # YAML mapping order is load-bearing: no depends_on anywhere, so b follows a and c follows b.
+    # No depends_on anywhere, so listing order chains them: b follows a and c follows b.
     recipe = parse_recipe(DS | {"a": train_block(), "b": train_block(), "c": train_block()})
     graph = validated_graph(recipe)
     assert execution_order(graph) == ["a", "b", "c"]
@@ -29,7 +30,9 @@ def test_implicit_chaining_follows_yaml_listing_order():
 
 def test_implicit_edge_does_not_break_test_xor_or_inheritance():
     # Standalone test listed after a train: ordered after it, but it does NOT inherit train_a's model.
-    recipe = parse_recipe(DS | {"train_a": train_block(), "test_b": {"type": "test", "model_path": "artifacts/old/latest"}})
+    recipe = parse_recipe(
+        DS | {"train_a": train_block(), "test_b": {"type": "test", "model_path": "artifacts/old/latest"}}
+    )
     graph = validated_graph(recipe)
     assert execution_order(graph) == ["train_a", "test_b"]
     assert graph.edges["train_a", "test_b"]["implicit"] is True
@@ -44,10 +47,13 @@ def test_explicit_dependency_names_model_source():
 
 
 def test_test_depending_on_non_train_is_rejected():
-    recipe = parse_recipe(DS | {
-        "e": {"type": "eval", "datasets": [{"dataset_name": "iris"}], "candidates": [{"name": "knn"}]},
-        "t": {"type": "test", "depends_on": ["e"]},
-    })
+    recipe = parse_recipe(
+        DS
+        | {
+            "e": {"type": "eval", "datasets": [{"dataset_name": "iris"}], "candidates": [{"name": "knn"}]},
+            "t": {"type": "test", "depends_on": ["e"]},
+        }
+    )
     with pytest.raises(RecipeError, match="exactly one train section"):
         validated_graph(recipe)
 
@@ -59,10 +65,13 @@ def test_unknown_dependency_suggests():
 
 
 def test_cycle_is_rejected():
-    recipe = parse_recipe(DS | {
-        "a": train_block(depends_on=["b"]),
-        "b": train_block(depends_on=["a"]),
-    })
+    recipe = parse_recipe(
+        DS
+        | {
+            "a": train_block(depends_on=["b"]),
+            "b": train_block(depends_on=["a"]),
+        }
+    )
     with pytest.raises(RecipeError, match="cycle"):
         validated_graph(recipe)
 
@@ -74,12 +83,20 @@ def test_self_dependency_is_rejected():
 
 
 def test_topological_order_with_fan_out_breaks_ties_by_listing():
-    recipe = parse_recipe(DS | {
-        "train_a": train_block(),
-        "test_1": {"type": "test", "depends_on": ["train_a"]},
-        "eval_x": {"type": "eval", "depends_on": ["train_a"], "datasets": [{"dataset_name": "iris"}], "candidates": [{"name": "knn"}]},
-        "test_2": {"type": "test", "depends_on": ["train_a"]},
-    })
+    recipe = parse_recipe(
+        DS
+        | {
+            "train_a": train_block(),
+            "test_1": {"type": "test", "depends_on": ["train_a"]},
+            "eval_x": {
+                "type": "eval",
+                "depends_on": ["train_a"],
+                "datasets": [{"dataset_name": "iris"}],
+                "candidates": [{"name": "knn"}],
+            },
+            "test_2": {"type": "test", "depends_on": ["train_a"]},
+        }
+    )
     graph = validated_graph(recipe)
     assert execution_order(graph) == ["train_a", "test_1", "eval_x", "test_2"]
     rows = describe(recipe, graph)

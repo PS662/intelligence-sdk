@@ -1,4 +1,5 @@
 """Every bad recipe must fail at load time with a config path and, where possible, a suggestion."""
+
 from __future__ import annotations
 
 import pytest
@@ -15,7 +16,9 @@ def _err(data: dict) -> str:
 
 
 def test_unknown_field_names_path_and_suggests():
-    msg = _err({"datasets": {"iris": file_dataset()}, "train_rf": train_block() | {"model": {"name": "knn", "parms": {}}}})
+    msg = _err(
+        {"datasets": {"iris": file_dataset()}, "train_rf": train_block() | {"model": {"name": "knn", "parms": {}}}}
+    )
     assert "train_rf.model.parms" in msg and "did you mean 'params'" in msg
 
 
@@ -51,15 +54,26 @@ def test_test_section_requires_exactly_one_model_source():
 
 
 def test_multi_dataset_rejected_with_not_supported_message():
-    msg = _err({"datasets": {"i": file_dataset()}, "t": train_block() | {"datasets": [{"dataset_name": "i"}, {"dataset_name": "i"}]}})
+    msg = _err(
+        {
+            "datasets": {"i": file_dataset()},
+            "t": train_block() | {"datasets": [{"dataset_name": "i"}, {"dataset_name": "i"}]},
+        }
+    )
     assert "not supported yet" in msg
 
 
 def test_eval_candidates_reject_list_params():
-    msg = _err({
-        "datasets": {"i": file_dataset()},
-        "e": {"type": "eval", "datasets": [{"dataset_name": "i"}], "candidates": [{"name": "knn", "params": {"n_neighbors": [1, 2]}}]},
-    })
+    msg = _err(
+        {
+            "datasets": {"i": file_dataset()},
+            "e": {
+                "type": "eval",
+                "datasets": [{"dataset_name": "i"}],
+                "candidates": [{"name": "knn", "params": {"n_neighbors": [1, 2]}}],
+            },
+        }
+    )
     assert "e.candidates[0].params.n_neighbors" in msg and "train section" in msg
 
 
@@ -74,7 +88,9 @@ def test_multiple_errors_reported_together():
 
 
 def test_grid_params_detects_lists():
-    recipe = parse_recipe({"datasets": {"iris": file_dataset()}, "t": train_block(params={"n_estimators": [5, 10], "max_depth": 3})})
+    recipe = parse_recipe(
+        {"datasets": {"iris": file_dataset()}, "t": train_block(params={"n_estimators": [5, 10], "max_depth": 3})}
+    )
     assert recipe.sections["t"].model.grid_params() == {"n_estimators": [5, 10]}
 
 
@@ -104,3 +120,32 @@ train_rf:
     p.write_text(text)
     recipe = load_recipe(p)
     assert recipe.sections["train_rf"].model.params["n_estimators"] == [20, 50]
+
+
+def test_runtime_block_defaults_and_validation():
+    recipe = parse_recipe({"datasets": {"iris": file_dataset()}, "t": train_block()})
+    assert recipe.runtime.backend.value == "sklearn" and recipe.runtime.artifact_store.value == "local"
+    msg = _err({"runtime": {"backend": "sklearnn"}, "datasets": {"iris": file_dataset()}, "t": train_block()})
+    assert "runtime.backend" in msg and "did you mean 'sklearn'" in msg
+    assert (
+        "runtime"
+        not in parse_recipe({"runtime": {}, "datasets": {"iris": file_dataset()}, "t": train_block()}).sections
+    )
+
+
+def test_every_adapter_implements_its_port():
+    """Contracts are inherited, not just imported: a missing method fails at instantiation."""
+    from intelligence_sdk.interfaces import ArtifactStore, DataLoader, Evaluator, ModelBackend
+    from intelligence_sdk.runtime import providers
+
+    assert all(issubclass(c, ModelBackend) for c in providers.BACKENDS.values())
+    assert all(issubclass(c, ArtifactStore) for c in providers.ARTIFACT_STORES.values())
+    assert all(issubclass(c, DataLoader) for c in providers.LOADERS.values())
+    assert issubclass(providers.EVALUATOR, Evaluator)
+    for cls in (
+        *providers.BACKENDS.values(),
+        *providers.ARTIFACT_STORES.values(),
+        *providers.LOADERS.values(),
+        providers.EVALUATOR,
+    ):
+        cls()  # abstract methods left unimplemented would raise TypeError here

@@ -1,4 +1,5 @@
 """Splits work on row ids, are deterministic, and fail loudly on tiny classes."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -24,7 +25,7 @@ def test_stratified_split_returns_ids_not_positions():
 def test_stratified_split_keeps_class_proportions():
     ids, y = _data()
     _, test = train_test_split_ids(ids, y, 0.25, True, seed=1)
-    lookup = dict(zip(ids.tolist(), y))
+    lookup = dict(zip(ids.tolist(), y, strict=True))
     counts = {c: sum(1 for i in test if lookup[i] == c) for c in ("c0", "c1", "c2")}
     assert counts == {"c0": 10, "c1": 8, "c2": 2}
 

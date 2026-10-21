@@ -42,7 +42,7 @@ def train_block(dataset_name: str = "iris", model: str = "random_forest", params
     block = {
         "type": "train",
         "datasets": [{"dataset_name": dataset_name}],
-        "pipeline": [{"step": "standard_scaler"}],
+        "preprocessing": [{"step": "standard_scaler"}],
         "model": {"name": model, "params": params or {}},
         "split": {"test_size": 0.2, "stratify": True},
         "seed": 7,

@@ -3,11 +3,12 @@
 Layout: ``<output_dir>/<section_name>/<run_id>/...`` with a ``latest`` pointer per
 section (symlink, with a ``latest.json`` fallback on filesystems that refuse symlinks).
 """
+
 from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import yaml
+
+from intelligence_sdk.interfaces import ArtifactStore
 
 LATEST = "latest"
 LATEST_JSON = "latest.json"
@@ -36,9 +39,9 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
-class LocalArtifactStore:
+class LocalArtifactStore(ArtifactStore):
     def new_run(self, section_name: str, output_dir: str) -> Path:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         run_dir = Path(output_dir) / section_name / f"{stamp}_{uuid.uuid4().hex[:6]}"
         run_dir.mkdir(parents=True, exist_ok=False)
         return run_dir

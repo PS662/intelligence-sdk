@@ -3,6 +3,7 @@
 In a real system this hash would be stored and managed behind DVC; here we recompute
 it on every load and the runner compares it with what the model recorded.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -14,11 +15,12 @@ from intelligence_sdk.core.errors import RecipeError, did_you_mean
 from intelligence_sdk.core.filters import apply_filter
 from intelligence_sdk.core.recipe import FileDataset
 from intelligence_sdk.core.types import DatasetVersion, LoadedDataset
+from intelligence_sdk.interfaces import DataLoader
 
 ROW_ID = "row_id"
 
 
-class CsvLoader:
+class CsvLoader(DataLoader):
     def load(self, definition: FileDataset) -> LoadedDataset:
         path = Path(definition.path)
         if not path.exists():

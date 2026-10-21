@@ -22,7 +22,7 @@ compare:
   folds: 5
   stratify: true
   seed: 42
-  pipeline:
+  preprocessing:
     - step: standard_scaler
   candidates:
     - name: random_forest

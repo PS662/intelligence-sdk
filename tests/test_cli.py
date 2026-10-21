@@ -1,4 +1,5 @@
 """The CLI is a consumer of the facade; these tests drive its ``main``."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -44,8 +45,12 @@ def test_recipe_error_is_one_message_no_traceback(cli, capsys, tmp_path):
 def test_run_train_recipe(cli, capsys, caplog, tmp_path):
     import logging
 
-    caplog.set_level(logging.INFO, logger="intelligence_sdk")  # pytest owns the root logger; the CLI's basicConfig is a no-op here
-    rc = cli.main(["run", "--recipe", str(ROOT / "configs" / "train_iris.yaml"), "--output-dir", str(tmp_path / "artifacts")])
+    caplog.set_level(
+        logging.INFO, logger="intelligence_sdk"
+    )  # pytest owns the root logger; the CLI's basicConfig is a no-op here
+    rc = cli.main(
+        ["run", "--recipe", str(ROOT / "configs" / "train_iris.yaml"), "--output-dir", str(tmp_path / "artifacts")]
+    )
     assert rc == 0
     assert "BEST:" in caplog.text
     assert "done. run directories:" in capsys.readouterr().out

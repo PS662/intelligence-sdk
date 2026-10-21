@@ -4,6 +4,7 @@ Version = MD5 of the canonically serialized frame (sorted columns, no index), wi
 the library version recorded as provenance. Same contract as the CSV loader, so the
 runner never knows which source it is looking at.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +17,7 @@ from intelligence_sdk.core.filters import apply_filter
 from intelligence_sdk.core.recipe import LibraryDataset
 from intelligence_sdk.core.registry import LibraryName
 from intelligence_sdk.core.types import DatasetVersion, LoadedDataset
+from intelligence_sdk.interfaces import DataLoader
 
 ROW_ID = "row_id"
 
@@ -30,7 +32,7 @@ def _clean(name: str) -> str:
     return name.replace(" (cm)", "").replace(" ", "_").replace("/", "_")
 
 
-class LibraryLoader:
+class LibraryLoader(DataLoader):
     def load(self, definition: LibraryDataset) -> LoadedDataset:
         bunch = _LOADERS[definition.name]()
         frame = pd.DataFrame(bunch.data, columns=[_clean(c) for c in bunch.feature_names])
@@ -45,7 +47,11 @@ class LibraryLoader:
             hash=digest,
             n_rows=len(frame),
             columns=[str(c) for c in frame.columns],
-            provenance={"hash_algorithm": "md5(canonical csv)", "library": "scikit-learn", "library_version": sklearn.__version__},
+            provenance={
+                "hash_algorithm": "md5(canonical csv)",
+                "library": "scikit-learn",
+                "library_version": sklearn.__version__,
+            },
         )
         frame = apply_filter(frame, definition.filter, "dataset.filter")
         return LoadedDataset(frame=frame, target=definition.target, version=version)

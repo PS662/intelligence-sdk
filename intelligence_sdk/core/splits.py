@@ -3,6 +3,7 @@
 Everything here works on *row identifiers*, never on positions, so what gets
 recorded in ``dataset.json`` can be re-selected exactly on a reloaded frame.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -23,7 +24,7 @@ def _groups(y: np.ndarray | None, n: int, stratify: bool) -> list[np.ndarray]:
 
 def _class_sizes(y: np.ndarray) -> dict[str, int]:
     classes, counts = np.unique(np.asarray(y), return_counts=True)
-    return {str(c): int(k) for c, k in zip(classes, counts)}
+    return {str(c): int(k) for c, k in zip(classes, counts, strict=True)}
 
 
 def train_test_split_ids(

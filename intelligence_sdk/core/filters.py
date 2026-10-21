@@ -1,6 +1,7 @@
 """Row filtering by id. Shared by every loader and by the runner's reference-level
 filter so both apply identical semantics: include first, then exclude. Filters
 subset the frame but never renumber it - the index (row ids) survives intact."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -38,8 +39,7 @@ def apply_filter(frame: pd.DataFrame, spec: FilterSpec | None, path: str) -> pd.
     if len(out) == 0:
         raise RecipeError(
             path,
-            f"no rows left after filtering (started with {before}); "
-            f"include={spec.include!r} exclude={spec.exclude!r}",
+            f"no rows left after filtering (started with {before}); include={spec.include!r} exclude={spec.exclude!r}",
         )
     return out
 

@@ -17,7 +17,7 @@ train_rf:
     test_size: 0.2
     stratify: true
   seed: 42
-  pipeline:
+  preprocessing:
     - step: standard_scaler
   model:
     name: random_forest

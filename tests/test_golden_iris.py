@@ -1,4 +1,5 @@
 """End-to-end runs on iris through the public facade, plus the data-dependent edge cases."""
+
 from __future__ import annotations
 
 import json
@@ -7,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from intelligence_sdk import default_runner, run_recipe
+from intelligence_sdk import build_runner, run_recipe
 from intelligence_sdk.core.errors import DatasetVersionMismatch, RecipeError
 from intelligence_sdk.core.recipe import parse_recipe
 from tests.conftest import file_dataset, train_block
@@ -30,7 +31,15 @@ def test_train_then_test_reproduces_holdout(artifacts, iris_path):
     train, test = out["train_rf"], out["test_rf"]
 
     assert train.metrics["holdout"]["accuracy"] >= 0.85  # loose: iris is easy, flakiness is not
-    for f in ("model.joblib", "model.json", "dataset.json", "metrics.json", "resolved_recipe.yaml", "run.json", "search_results.csv"):
+    for f in (
+        "model.joblib",
+        "model.json",
+        "dataset.json",
+        "metrics.json",
+        "resolved_recipe.yaml",
+        "run.json",
+        "search_results.csv",
+    ):
         assert (train.run_dir / f).exists(), f
     # Grid search: one candidate dir per combination, best highlighted.
     assert len(list((train.run_dir / "candidates").iterdir())) == 2
@@ -124,7 +133,8 @@ def test_eval_report_shape(artifacts, iris_path):
 
 def test_library_dataset_source(artifacts):
     recipe = {
-        "train_lib": train_block(params={"n_estimators": 5}) | {"datasets": [{"dataset": {"source": "library", "name": "iris", "target": "species"}}]},
+        "train_lib": train_block(params={"n_estimators": 5})
+        | {"datasets": [{"dataset": {"source": "library", "name": "iris", "target": "species"}}]},
     }
     out = _run(recipe, artifacts)
     assert out["train_lib"].dataset_json["version"]["source"] == "library"
@@ -168,21 +178,23 @@ def test_inherited_test_refuses_changed_dataset_unless_allowed(artifacts, iris_p
 # ------------------------------------------------------- data edge cases
 
 
-def _train_on(frame: pd.DataFrame, tmp_path: Path, artifacts: Path, pipeline=None, **extra):
+def _train_on(frame: pd.DataFrame, tmp_path: Path, artifacts: Path, preprocessing=None, **extra):
     path = tmp_path / "data.csv"
     frame.to_csv(path, index=False)
     block = train_block(params={"n_estimators": 5}, **extra) | {"datasets": [{"dataset": file_dataset(path)}]}
-    if pipeline is not None:
-        block["pipeline"] = pipeline
+    if preprocessing is not None:
+        block["preprocessing"] = preprocessing
     return _run({"t": block}, artifacts)
 
 
 def test_nans_require_an_imputer(iris_path, tmp_path, artifacts):
     frame = pd.read_csv(iris_path)
     frame.loc[3, "sepal_length"] = None
-    with pytest.raises(RecipeError, match="t.pipeline.*simple_imputer"):
+    with pytest.raises(RecipeError, match="t.preprocessing.*simple_imputer"):
         _train_on(frame, tmp_path, artifacts)
-    out = _train_on(frame, tmp_path, artifacts, pipeline=[{"step": "simple_imputer", "params": {"strategy": "mean"}}])
+    out = _train_on(
+        frame, tmp_path, artifacts, preprocessing=[{"step": "simple_imputer", "params": {"strategy": "mean"}}]
+    )
     assert out["t"].metrics["holdout"]["accuracy"] > 0.8
 
 
@@ -220,29 +232,43 @@ def test_empty_filter_is_rejected(iris_path, artifacts):
 def test_resolve_rejects_bad_hyperparameter_before_any_io(iris_path, artifacts):
     recipe = parse_recipe({"datasets": {"iris": file_dataset(iris_path)}, "t": train_block(params={"n_estimator": 5})})
     with pytest.raises(RecipeError, match="t.model.params.n_estimator.*did you mean 'n_estimators'"):
-        default_runner().run(recipe, output_dir=str(artifacts))
+        build_runner(recipe.runtime).run(recipe, output_dir=str(artifacts))
     assert not artifacts.exists()  # nothing was written
 
 
 def test_resolve_rejects_metric_model_kind_mismatch(iris_path, artifacts):
-    recipe = parse_recipe({
-        "datasets": {"iris": file_dataset(iris_path)},
-        "compare": {"type": "eval", "datasets": [{"dataset_name": "iris"}], "candidates": [{"name": "linear_regression"}], "metrics": ["f1_macro"]},
-    })
+    recipe = parse_recipe(
+        {
+            "datasets": {"iris": file_dataset(iris_path)},
+            "compare": {
+                "type": "eval",
+                "datasets": [{"dataset_name": "iris"}],
+                "candidates": [{"name": "linear_regression"}],
+                "metrics": ["f1_macro"],
+            },
+        }
+    )
     with pytest.raises(RecipeError, match="compare.metrics\\[0\\]: f1_macro is a classifier metric"):
-        default_runner().resolve(recipe)
-    recipe2 = parse_recipe({"datasets": {"iris": file_dataset(iris_path)}, "t": train_block(model="linear_regression") | {"search": {"scoring": "accuracy"}}})
+        build_runner(recipe.runtime).resolve(recipe)
+    recipe2 = parse_recipe(
+        {
+            "datasets": {"iris": file_dataset(iris_path)},
+            "t": train_block(model="linear_regression") | {"search": {"scoring": "accuracy"}},
+        }
+    )
     with pytest.raises(RecipeError, match="t.search.scoring"):
-        default_runner().resolve(recipe2)
+        build_runner().resolve(recipe2)
 
 
 def test_resolve_rejects_missing_file_and_model(artifacts):
-    recipe = parse_recipe({"t": train_block() | {"datasets": [{"dataset": {"source": "file", "path": "nope.csv", "target": "y"}}]}})
+    recipe = parse_recipe(
+        {"t": train_block() | {"datasets": [{"dataset": {"source": "file", "path": "nope.csv", "target": "y"}}]}}
+    )
     with pytest.raises(RecipeError, match="dataset.path: dataset file not found"):
-        default_runner().resolve(recipe)
+        build_runner(recipe.runtime).resolve(recipe)
     recipe2 = parse_recipe({"t": {"type": "test", "model_path": str(artifacts / "none" / "latest")}})
     with pytest.raises(RecipeError, match="t.model_path: no trained model"):
-        default_runner().resolve(recipe2)
+        build_runner().resolve(recipe2)
 
 
 def test_generated_csv_matches_library_loader_columns(iris_path):

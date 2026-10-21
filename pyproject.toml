@@ -1,8 +1,10 @@
 [project]
 name = "intelligence-sdk"
 version = "0.1.0"
-description = "Config-driven model building utility: one YAML recipe drives data loading, training, testing and evaluation."
+description = "Config-driven model building: one YAML recipe drives data loading, training, testing and evaluation."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE.md"]
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.6",
@@ -16,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 render = ["matplotlib>=3.8"]
-dev = ["pytest>=8.0", "matplotlib>=3.8"]
+dev = ["pytest>=8.0", "matplotlib>=3.8", "ruff>=0.6", "pdoc>=14"]
 
 [build-system]
 requires = ["hatchling"]
@@ -30,3 +32,15 @@ packages = ["intelligence_sdk"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["docs/api"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W"]
+ignore = ["E501"]  # long lines are wrapped by the formatter where it can; the rest are deliberate
+
+[tool.ruff.lint.isort]
+known-first-party = ["intelligence_sdk"]

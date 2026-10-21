@@ -1,20 +1,21 @@
 """Names the SDK owns. Config refers to components only by these enums; a backend
 maps them to concrete library classes. Config can therefore never name an arbitrary
 import path - the registry is the allowlist."""
+
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 from intelligence_sdk.core.types import EstimatorKind
 
 
-class Preprocessor(str, Enum):
+class Preprocessor(StrEnum):
     STANDARD_SCALER = "standard_scaler"
     MIN_MAX_SCALER = "min_max_scaler"
     SIMPLE_IMPUTER = "simple_imputer"
 
 
-class Model(str, Enum):
+class Model(StrEnum):
     LOGISTIC_REGRESSION = "logistic_regression"
     RANDOM_FOREST = "random_forest"
     DECISION_TREE = "decision_tree"
@@ -24,7 +25,19 @@ class Model(str, Enum):
     LINEAR_REGRESSION = "linear_regression"
 
 
-class LibraryName(str, Enum):
+class Backend(StrEnum):
+    """Model backends the runtime can build. Selected recipe-wide in ``runtime.backend``."""
+
+    SKLEARN = "sklearn"
+
+
+class ArtifactStoreKind(StrEnum):
+    """Artifact stores the runtime can build. Selected in ``runtime.artifact_store``."""
+
+    LOCAL = "local"
+
+
+class LibraryName(StrEnum):
     """Datasets a ``source: library`` definition may name."""
 
     IRIS = "iris"
@@ -32,7 +45,7 @@ class LibraryName(str, Enum):
     BREAST_CANCER = "breast_cancer"
 
 
-class Scoring(str, Enum):
+class Scoring(StrEnum):
     """Metrics with a known direction and a known task kind. Restricting ``scoring`` to
     this set lets grid search rank candidates correctly and lets the resolve phase
     reject a classification metric on a regressor before any data loads."""

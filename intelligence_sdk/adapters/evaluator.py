@@ -2,8 +2,9 @@
 
 Because every backend contracts to return predictions as arrays with a declared
 result type, this one implementation serves all of them. A backend that must score
-GPU-resident tensors or streams would implement the Evaluator port itself.
+GPU-resident tensors or streams would subclass the Evaluator port itself.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -13,6 +14,7 @@ from sklearn import metrics as skm
 
 from intelligence_sdk.core.registry import DEFAULT_SCORING, Scoring
 from intelligence_sdk.core.types import EstimatorKind, PredictionResult, ResultType
+from intelligence_sdk.interfaces import Evaluator
 
 _CLASSIFICATION = {
     Scoring.ACCURACY: lambda t, p: skm.accuracy_score(t, p),
@@ -27,7 +29,7 @@ _REGRESSION = {
 }
 
 
-class DefaultEvaluator:
+class DefaultEvaluator(Evaluator):
     def evaluate(
         self, y_true: np.ndarray, prediction: PredictionResult, metrics: list[Scoring] | None = None
     ) -> dict[str, Any]:

@@ -2,8 +2,9 @@
 
 This is the only module that names scikit-learn estimator classes. Config refers to
 components by registry enum; the tables below are the allowlist that maps them.
-A torch backend would be a sibling module implementing the same protocol.
+A torch backend would be a sibling module subclassing the same interface.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,6 +26,7 @@ from sklearn.tree import DecisionTreeClassifier
 from intelligence_sdk.core.recipe import StepSpec
 from intelligence_sdk.core.registry import Model, Preprocessor
 from intelligence_sdk.core.types import EstimatorKind, PredictionResult, ResultType
+from intelligence_sdk.interfaces import ModelBackend
 
 MODEL_FILE = "model.joblib"
 META_FILE = "model.json"
@@ -46,7 +48,7 @@ _MODELS: dict[Model, tuple[type, EstimatorKind]] = {
 }
 
 
-class SklearnBackend:
+class SklearnBackend(ModelBackend):
     # ---- static knowledge (no data needed) ----
     def param_names(self, model: Model) -> set[str]:
         return set(_MODELS[model][0]().get_params())
@@ -58,8 +60,8 @@ class SklearnBackend:
         return _MODELS[model][1]
 
     # ---- lifecycle ----
-    def build(self, pipeline: list[StepSpec], model: Model, params: dict[str, Any], seed: int) -> Pipeline:
-        steps = [(spec.step.value, _PREPROCESSORS[spec.step](**spec.params)) for spec in pipeline]
+    def build(self, preprocessing: list[StepSpec], model: Model, params: dict[str, Any], seed: int) -> Pipeline:
+        steps = [(spec.step.value, _PREPROCESSORS[spec.step](**spec.params)) for spec in preprocessing]
         cls, _ = _MODELS[model]
         estimator = cls(**params)
         if "random_state" in estimator.get_params() and "random_state" not in params:

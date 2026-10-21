@@ -1,6 +1,7 @@
 """Optional PNG rendering of a recipe DAG. matplotlib is an optional dependency
 (``pip install intelligence-sdk[render]``); ``inspect`` degrades to its table
 without it. Explicit edges are solid, implicit (ordering-only) edges dashed."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -31,7 +32,17 @@ def render_png(graph: nx.DiGraph, out_path: Path, title: str = "") -> Path:
     explicit = [(u, v) for u, v, d in graph.edges(data=True) if not d.get("implicit")]
     implicit = [(u, v) for u, v, d in graph.edges(data=True) if d.get("implicit")]
     nx.draw_networkx_edges(graph, pos, edgelist=explicit, arrows=True, arrowsize=18, node_size=3400, ax=ax)
-    nx.draw_networkx_edges(graph, pos, edgelist=implicit, arrows=True, arrowsize=18, style="dashed", edge_color="#888", node_size=3400, ax=ax)
+    nx.draw_networkx_edges(
+        graph,
+        pos,
+        edgelist=implicit,
+        arrows=True,
+        arrowsize=18,
+        style="dashed",
+        edge_color="#888",
+        node_size=3400,
+        ax=ax,
+    )
     ax.set_title(title or "recipe DAG  (solid = explicit depends_on, dashed = implicit listing order)", fontsize=9)
     ax.axis("off")
     fig.tight_layout()

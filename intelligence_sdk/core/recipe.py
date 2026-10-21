@@ -1,17 +1,17 @@
 """Recipe schema and loader.
 
-A recipe is a YAML mapping with one reserved key, ``datasets`` (a registry of named
-dataset definitions), and any number of user-named *sections*. Each section carries
-a ``type`` that selects its schema (train / test / eval today; the discriminated
-union is the seam for ``preprocess`` and friends later).
+A recipe is a YAML mapping with two reserved keys - ``datasets`` (a registry of named
+dataset definitions) and ``runtime`` (which implementations run it) - and any number
+of user-named *sections*. Each section carries a ``type`` that selects its schema;
+new section types are added as members of the ``Section`` union.
 
 Validation is fail-fast and every error names the config path that failed, with a
-did-you-mean suggestion when we can compute one.
+did-you-mean suggestion when one can be computed.
 
-NOTE: YAML mapping order is load-bearing. Section listing order drives implicit
-dependency chaining and topological tie-breaks (see ``core.dag``). ``yaml.safe_load``
-returns insertion-ordered dicts, so the order the user wrote is the order we keep.
+Section listing order drives implicit dependency chaining and topological tie-breaks
+(see ``core.dag``); ``yaml.safe_load`` preserves the order the user wrote.
 """
+
 from __future__ import annotations
 
 import re
@@ -23,9 +23,9 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 from intelligence_sdk.core.errors import RecipeError, RecipeValidationError, did_you_mean
-from intelligence_sdk.core.registry import LibraryName, Model, Preprocessor, Scoring
+from intelligence_sdk.core.registry import ArtifactStoreKind, Backend, LibraryName, Model, Preprocessor, Scoring
 
-RESERVED_KEYS = {"datasets"}
+RESERVED_KEYS = {"datasets", "runtime"}
 SECTION_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
@@ -39,6 +39,20 @@ class StrictModel(BaseModel):
     problem in the recipe in the same pass."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+# ------------------------------------------------------------------------ runtime
+
+
+class RuntimeSpec(StrictModel):
+    """Which implementations run the recipe. Optional, with defaults. Recipe-wide
+    because a test must load a model with the backend that saved it."""
+
+    backend: Backend = Backend.SKLEARN
+    artifact_store: ArtifactStoreKind = ArtifactStoreKind.LOCAL
+
+
+_runtime_adapter = TypeAdapter(RuntimeSpec)
 
 
 # ----------------------------------------------------------------------- datasets
@@ -67,7 +81,7 @@ class LibraryDataset(StrictModel):
     filter: FilterSpec | None = None
 
 
-DatasetDef = Annotated[Union[FileDataset, LibraryDataset], Field(discriminator="source")]
+DatasetDef = Annotated[FileDataset | LibraryDataset, Field(discriminator="source")]
 
 
 class DatasetRef(StrictModel):
@@ -80,7 +94,7 @@ class DatasetRef(StrictModel):
     save: bool = False
 
     @model_validator(mode="after")
-    def _exactly_one_source(self) -> "DatasetRef":
+    def _exactly_one_source(self) -> DatasetRef:
         if (self.dataset_name is None) == (self.dataset is None):
             raise ValueError("set exactly one of 'dataset_name' (registry reference) or 'dataset' (inline definition)")
         return self
@@ -92,9 +106,7 @@ def _exactly_one_dataset(refs: list[DatasetRef] | None, field: str = "datasets")
     if len(refs) == 0:
         raise ValueError(f"'{field}' must list exactly one dataset")
     if len(refs) > 1:
-        raise ValueError(
-            f"'{field}' lists {len(refs)} datasets; multi-dataset sections are not supported yet (v1 accepts exactly one)"
-        )
+        raise ValueError(f"'{field}' lists {len(refs)} datasets; multi-dataset sections are not supported yet")
 
 
 # --------------------------------------------------------------------- components
@@ -136,13 +148,13 @@ class TrainSection(SectionBase):
     type: Literal["train"]
     datasets: list[DatasetRef]
     model: ModelSpec
-    pipeline: list[StepSpec] = Field(default_factory=list)
+    preprocessing: list[StepSpec] = Field(default_factory=list)
     split: SplitSpec = Field(default_factory=SplitSpec)
     search: SearchSpec = Field(default_factory=SearchSpec)
     seed: int = 42
 
     @model_validator(mode="after")
-    def _check(self) -> "TrainSection":
+    def _check(self) -> TrainSection:
         _exactly_one_dataset(self.datasets)
         return self
 
@@ -154,9 +166,6 @@ class TestSection(SectionBase):
     ``model_path``. Dataset: omitted (inherited from the model's recorded dataset,
     hash-checked, default ``rows: holdout``) or explicit (``rows: all`` by default,
     never refused - this is the inference-on-new-data path).
-
-    ``rows: {ids: [...]}`` is a documented seam for scoring an explicit id list; it is
-    not built in v1.
     """
 
     type: Literal["test"]
@@ -165,7 +174,7 @@ class TestSection(SectionBase):
     rows: Literal["holdout", "all"] | None = None
 
     @model_validator(mode="after")
-    def _check(self) -> "TestSection":
+    def _check(self) -> TestSection:
         has_path = self.model_path is not None
         has_dep = len(self.depends_on) > 0
         if has_path == has_dep:
@@ -181,14 +190,14 @@ class EvalSection(SectionBase):
     type: Literal["eval"]
     datasets: list[DatasetRef]
     candidates: list[ModelSpec] = Field(min_length=1)
-    pipeline: list[StepSpec] = Field(default_factory=list)
+    preprocessing: list[StepSpec] = Field(default_factory=list)
     folds: int = Field(default=5, ge=2)
     stratify: bool = True
     metrics: list[Scoring] | None = None
     seed: int = 42
 
     @model_validator(mode="after")
-    def _check(self) -> "EvalSection":
+    def _check(self) -> EvalSection:
         _exactly_one_dataset(self.datasets)
         for i, cand in enumerate(self.candidates):
             lists = cand.grid_params()
@@ -200,7 +209,7 @@ class EvalSection(SectionBase):
         return self
 
 
-Section = Annotated[Union[TrainSection, TestSection, EvalSection], Field(discriminator="type")]
+Section = Annotated[TrainSection | TestSection | EvalSection, Field(discriminator="type")]
 SECTION_TYPES = ("train", "test", "eval")
 
 _section_adapter = TypeAdapter(Section)
@@ -214,12 +223,13 @@ class Recipe(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     source: str = "<memory>"
+    runtime: RuntimeSpec = Field(default_factory=RuntimeSpec)
     datasets: dict[str, FileDataset | LibraryDataset] = Field(default_factory=dict)
     sections: dict[str, TrainSection | TestSection | EvalSection] = Field(default_factory=dict)
 
     @property
     def order(self) -> list[str]:
-        """Listing order - load-bearing, see module docstring."""
+        """Section names in listing order."""
         return list(self.sections)
 
     def resolve_dataset(self, ref: DatasetRef, path: str) -> FileDataset | LibraryDataset:
@@ -255,6 +265,13 @@ def parse_recipe(data: Any, source: str = "<memory>") -> Recipe:
     datasets: dict[str, Any] = {}
     sections: dict[str, Any] = {}
 
+    runtime = RuntimeSpec()
+    if "runtime" in data:
+        try:
+            runtime = _runtime_adapter.validate_python(data["runtime"] or {})
+        except ValidationError as exc:
+            errors.extend(_convert(exc, prefix="runtime", root=RuntimeSpec))
+
     raw_datasets = data.get("datasets") or {}
     if not isinstance(raw_datasets, dict):
         errors.append(RecipeError("datasets", "must be a mapping of dataset name to definition"))
@@ -274,7 +291,7 @@ def parse_recipe(data: Any, source: str = "<memory>") -> Recipe:
                 RecipeError(
                     str(name),
                     "section names must be identifiers matching [A-Za-z_][A-Za-z0-9_-]* "
-                    "(they become artifact directory names); 'datasets' is reserved for the registry",
+                    "(they become artifact directory names); 'datasets' and 'runtime' are reserved keys",
                 )
             )
             continue
@@ -292,7 +309,7 @@ def parse_recipe(data: Any, source: str = "<memory>") -> Recipe:
     if errors:
         raise RecipeValidationError(errors)
 
-    recipe = Recipe(source=source, datasets=datasets, sections=sections)
+    recipe = Recipe(source=source, runtime=runtime, datasets=datasets, sections=sections)
     _check_dataset_refs(recipe, errors)
     if errors:
         raise RecipeValidationError(errors)
@@ -313,6 +330,7 @@ def _check_dataset_refs(recipe: Recipe, errors: list[RecipeError]) -> None:
 
 
 _QUOTED = re.compile(r"'([^']*)'")
+
 
 def _unwrap(annotation: Any) -> list[Any]:
     """Candidate model classes reachable from a type annotation (through Annotated,
@@ -368,7 +386,6 @@ def _tag_of(model_cls: Any) -> str | None:
         if field is not None and get_origin(field.annotation) is Literal:
             return get_args(field.annotation)[0]
     return None
-
 
 
 def _loc_to_path(prefix: str, loc: tuple[Any, ...]) -> str:

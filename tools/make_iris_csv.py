@@ -4,8 +4,9 @@
 Sample data is not committed; this script regenerates it from scikit-learn's bundled
 copy. Column names follow the same cleaning the SDK's library loader applies, so a
 ``source: file`` recipe on this CSV and a ``source: library`` recipe on ``iris`` see
-identical columns (a test pins that).
+identical columns.
 """
+
 from __future__ import annotations
 
 import sys

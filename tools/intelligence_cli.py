@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 """intelligence-sdk command line.
 
-This script is a *consumer* of the SDK, not part of it: it imports only the public
-facade (``load_recipe``, ``run_recipe``, ``default_runner``) - the same three names a
-services layer would use. Install the package first (``uv pip install -e .``).
+This script is a consumer of the SDK, not part of it: it imports only the public
+facade (``load_recipe``, ``run_recipe``, ``build_runner``). Install the package first
+(``uv pip install -e .``).
 
     python tools/intelligence_cli.py run     --recipe configs/train_iris.yaml
     python tools/intelligence_cli.py inspect --recipe configs/iris_dag.yaml
     python tools/intelligence_cli.py list-components --model random_forest
 """
+
 from __future__ import annotations
 
 import argparse
@@ -16,10 +17,11 @@ import logging
 import sys
 from pathlib import Path
 
-from intelligence_sdk import default_runner, load_recipe, run_recipe
+from intelligence_sdk import build_runner, load_recipe, run_recipe
 from intelligence_sdk.core.dag import describe, validated_graph
 from intelligence_sdk.core.errors import RecipeError
 from intelligence_sdk.core.registry import LibraryName, Model, Preprocessor, Scoring
+from intelligence_sdk.runtime import available_providers
 
 EPILOG = """\
 examples:
@@ -45,7 +47,7 @@ recipe skeleton (block-style YAML; every section has a `type`):
     split:
       test_size: 0.2
       stratify: true
-    pipeline:
+    preprocessing:
       - step: standard_scaler
     model:
       name: random_forest
@@ -80,7 +82,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_inspect(args: argparse.Namespace) -> int:
     recipe = load_recipe(args.recipe)
     graph = validated_graph(recipe)
-    default_runner().resolve(recipe)  # component / hyperparameter / metric checks, no data
+    build_runner(recipe.runtime).resolve(recipe)  # component / hyperparameter / metric checks, no data
     rows = describe(recipe, graph)
 
     print(f"recipe: {args.recipe}")
@@ -105,7 +107,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def cmd_list_components(args: argparse.Namespace) -> int:
-    backend = default_runner().backend
+    backend = build_runner().backend
     if args.model:
         try:
             model = Model(args.model)
@@ -117,7 +119,7 @@ def cmd_list_components(args: argparse.Namespace) -> int:
         for p in sorted(backend.param_names(model)):
             print(f"  {p}")
         return 0
-    print("preprocessing steps (pipeline[].step):")
+    print("preprocessing steps (preprocessing[].step):")
     for p in Preprocessor:
         print(f"  {p.value:<22} params: {', '.join(sorted(backend.step_param_names(p)))}")
     print("\nmodels (model.name / candidates[].name):")
@@ -126,6 +128,9 @@ def cmd_list_components(args: argparse.Namespace) -> int:
     print("\nscoring / metrics:")
     for s in Scoring:
         print(f"  {s.value:<22} {s.kind.value}")
+    print("\nruntime block (optional):")
+    for key, names in available_providers().items():
+        print(f"  {key:<22} {', '.join(names)}")
     print("\nlibrary datasets (source: library):")
     print("  " + ", ".join(n.value for n in LibraryName))
     print("\ntip: list-components --model <name> prints that model's hyperparameters.")
@@ -135,20 +140,35 @@ def cmd_list_components(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="intelligence_cli.py",
-        description="Build simple ML models from a YAML recipe: one file describes datasets, pipeline, model and what to do (train / test / eval).",
+        description="Build simple ML models from a YAML recipe: one file describes datasets, preprocessing, model and what to do (train / test / eval).",
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
-    run = sub.add_parser("run", help="validate and execute a recipe", description="Validate the whole recipe first (schema, DAG, components, metric compatibility), then execute its sections in dependency order.")
+    run = sub.add_parser(
+        "run",
+        help="validate and execute a recipe",
+        description="Validate the whole recipe first (schema, DAG, components, metric compatibility), then execute its sections in dependency order.",
+    )
     run.add_argument("--recipe", required=True, help="path to the recipe YAML")
-    run.add_argument("--output-dir", help="override every section's output_dir (default: as written in the recipe, usually ./artifacts)")
-    run.add_argument("--allow-dataset-mismatch", action="store_true", help="let a test score an inherited dataset whose hash differs from the one the model was trained on (leakage risk; off by default)")
+    run.add_argument(
+        "--output-dir",
+        help="override every section's output_dir (default: as written in the recipe, usually ./artifacts)",
+    )
+    run.add_argument(
+        "--allow-dataset-mismatch",
+        action="store_true",
+        help="let a test score an inherited dataset whose hash differs from the one the model was trained on (leakage risk; off by default)",
+    )
     run.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     run.set_defaults(func=cmd_run)
 
-    insp = sub.add_parser("inspect", help="validate a recipe and show its DAG without running it", description="Validate the recipe and print the execution order. Writes a PNG of the DAG next to the recipe when matplotlib is available.")
+    insp = sub.add_parser(
+        "inspect",
+        help="validate a recipe and show its DAG without running it",
+        description="Validate the recipe and print the execution order. Writes a PNG of the DAG next to the recipe when matplotlib is available.",
+    )
     insp.add_argument("--recipe", required=True, help="path to the recipe YAML")
     insp.add_argument("--png", help="where to write the DAG image (default: <recipe>.dag.png)")
     insp.set_defaults(func=cmd_inspect)
@@ -170,7 +190,10 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except RecipeError as exc:
         print(f"\nrecipe error\n{exc}", file=sys.stderr)
-        print("\nhint: paths are <section>.<field>... as written in the YAML; `list-components` shows valid names.", file=sys.stderr)
+        print(
+            "\nhint: paths are <section>.<field>... as written in the YAML; `list-components` shows valid names.",
+            file=sys.stderr,
+        )
         return 1
 
 

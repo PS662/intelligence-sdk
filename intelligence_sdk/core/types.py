@@ -1,9 +1,10 @@
 """Shared value types. This module imports nothing from the rest of the SDK so that
 ``interfaces`` can depend on it without creating a cycle."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 
-class ResultType(str, Enum):
+class ResultType(StrEnum):
     """What a backend's ``predict`` produced. The evaluator keys its metrics on this,
     so config never needs a task-type field: the model tells us what it emitted."""
 
@@ -20,7 +21,7 @@ class ResultType(str, Enum):
     CONTINUOUS = "continuous"
 
 
-class EstimatorKind(str, Enum):
+class EstimatorKind(StrEnum):
     """Static nature of a registry model, known without touching data. Used at
     resolve time to reject metric/model mismatches before anything runs."""
 
