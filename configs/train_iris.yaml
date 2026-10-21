@@ -1,29 +1,35 @@
-# Train a classifier on iris with a small grid search.
-# A list-valued hyperparameter triggers the search; scalars are fixed.
+# Train a classifier on iris. The dataset carries its own split and is saved, so a
+# later test recipe can load it and score the recorded test split.
+# A list-valued hyperparameter triggers a cross-validated search over the train split.
 
 datasets:
-  iris_1:
+  iris:
     source: file
     path: data/iris.csv
     target: species
-    # filter:                               # optional, definition-level row filter
-    #   exclude: data/outliers.csv          # a one-column csv of ids, or an inline list
+    split:
+      test_size: 0.2
+      stratify: true
+    seed: 42
+    save_dataset:
+      path: data/derived/iris
+      overwrite: true
 
 train_rf:
   type: train
   datasets:
-    - dataset_name: iris_1                  # registry reference (typo -> did-you-mean)
-  split:                                    # the split is an artifact: recorded, never recomputed
-    test_size: 0.2
-    stratify: true
-  seed: 42
+    - dataset_name: iris
   preprocessing:
     - step: standard_scaler
   model:
     name: random_forest
     params:
-      n_estimators: [20, 50]                # list -> grid search
+      n_estimators: [20, 50]                # list -> search
       max_depth: 3                          # scalar -> fixed
-  search:
+  hyperparam_search:
     cv: 3
     scoring: accuracy
+  seed: 42
+  recipe_output:
+    save_path: artifacts/train_rf
+    overwrite: true

@@ -1,22 +1,13 @@
-"""``source: library`` loader for scikit-learn's bundled datasets.
-
-Version = MD5 of the canonically serialized frame (sorted columns, no index), with
-the library version recorded as origin. Same contract as the CSV loader, so the
-runner never knows which source it is looking at.
-"""
+"""``source: library`` loader for scikit-learn's bundled datasets."""
 
 from __future__ import annotations
 
-import hashlib
-
 import pandas as pd
-import sklearn
 from sklearn import datasets as skd
 
-from intelligence_sdk.core.filters import apply_filter
 from intelligence_sdk.core.recipe import LibraryDataset
 from intelligence_sdk.core.registry import LibraryName
-from intelligence_sdk.core.types import DatasetVersion, LoadedDataset
+from intelligence_sdk.core.types import Dataset
 from intelligence_sdk.interfaces import DataLoader
 
 ROW_ID = "row_id"
@@ -33,25 +24,9 @@ def _clean(name: str) -> str:
 
 
 class LibraryLoader(DataLoader):
-    def load(self, definition: LibraryDataset) -> LoadedDataset:
-        bunch = _LOADERS[definition.name]()
+    def load(self, spec: LibraryDataset, name: str) -> Dataset:
+        bunch = _LOADERS[spec.dataset]()
         frame = pd.DataFrame(bunch.data, columns=[_clean(c) for c in bunch.feature_names])
-        frame[definition.target] = [str(bunch.target_names[i]) for i in bunch.target]
+        frame[spec.target] = [str(bunch.target_names[i]) for i in bunch.target]
         frame.index = pd.RangeIndex(len(frame), name=ROW_ID)
-
-        canonical = frame.sort_index(axis=1).to_csv(index=False).encode()
-        digest = hashlib.md5(canonical).hexdigest()  # noqa: S324
-        version = DatasetVersion(
-            source="library",
-            locator=definition.name.value,
-            hash=digest,
-            n_rows=len(frame),
-            columns=[str(c) for c in frame.columns],
-            origin={
-                "hash_algorithm": "md5(canonical csv)",
-                "library": "scikit-learn",
-                "library_version": sklearn.__version__,
-            },
-        )
-        frame = apply_filter(frame, definition.filter, "dataset.filter")
-        return LoadedDataset(frame=frame, target=definition.target, version=version)
+        return Dataset(name=name, frame=frame, target=spec.target)

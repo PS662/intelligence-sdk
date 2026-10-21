@@ -22,7 +22,7 @@ install: venv    ## install the package and the intelligence-sdk command into th
 install-dev: venv ## editable install with test/lint/docs extras
 	$(UV) pip install --python $(PY) -e ".[dev]"
 
-data:            ## regenerate data/iris.csv (sample data is not committed)
+data:            ## regenerate data/iris.csv and data/iris_extra.csv (sample data is not committed)
 	$(PY) tools/make_iris_csv.py
 
 test:            ## run the test suite
@@ -54,6 +54,6 @@ run-eval:        ## k-fold comparison of candidate models
 run-dag: data    ## the multi-section recipe end to end
 	$(CLI) run --recipe configs/iris_dag.yaml
 
-clean:           ## remove run artifacts, caches and generated docs
-	rm -rf artifacts docs/api .pytest_cache .ruff_cache configs/*.dag.png
+clean:           ## remove run artifacts, derived data, caches and generated docs
+	rm -rf artifacts data/derived docs/api .pytest_cache .ruff_cache configs/*.dag.png
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

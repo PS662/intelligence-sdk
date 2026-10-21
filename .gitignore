@@ -10,3 +10,4 @@ data/*.csv
 *.dag.png
 docs/api/
 .ruff_cache/
+data/derived/

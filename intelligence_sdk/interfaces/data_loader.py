@@ -3,19 +3,19 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
-from intelligence_sdk.core.types import LoadedDataset
+from intelligence_sdk.core.types import Dataset
 
 if TYPE_CHECKING:  # schema types only for annotations; no runtime import of core.recipe
-    from intelligence_sdk.core.recipe import FileDataset, LibraryDataset
+    from intelligence_sdk.core.recipe import FileDataset, LibraryDataset, SavedDataset
 
 
 class DataLoader(ABC):
-    """Materializes one dataset definition.
+    """Materializes one dataset spec into a raw ``Dataset``.
 
-    Contract: the returned frame is indexed by stable row identifiers (original file
-    index or the configured id column), the definition-level filter is already
-    applied, and ``version`` identifies the *unfiltered* source content.
+    Contract: the frame is indexed by unique row ids (positional ``row_id`` or the
+    configured id column). Filters, split and folds are applied afterwards by the
+    resolver; only a saved dataset arrives with its recorded split and folds.
     """
 
     @abstractmethod
-    def load(self, definition: FileDataset | LibraryDataset) -> LoadedDataset: ...
+    def load(self, spec: FileDataset | LibraryDataset | SavedDataset, name: str) -> Dataset: ...

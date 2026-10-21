@@ -1,8 +1,18 @@
-# Score a trained model on the holdout rows recorded when it was trained.
-# No datasets block = the dataset is inherited from the model's dataset.json and its
-# hash must match (leakage guard). Run configs/train_iris.yaml first.
+# Score a saved model on the test split of the dataset it was trained on.
+# Run configs/train_iris.yaml first: it saves both the model and the dataset.
+# Without the filter every row would be scored; the split reference keeps only
+# the rows the model never saw.
 
 test_rf:
   type: test
-  model_path: artifacts/train_rf/latest     # symlink to the most recent train_rf run
-  rows: holdout                             # default when the dataset is inherited
+  model_path: artifacts/train_rf
+  datasets:
+    - name: test_split
+      source: dataset                       # a dataset saved by this tool
+      path: data/derived/iris
+      filter:
+        exclude:
+          split: train
+  recipe_output:
+    save_path: artifacts/test_rf
+    overwrite: true

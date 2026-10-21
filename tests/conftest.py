@@ -35,17 +35,39 @@ def artifacts(tmp_path: Path) -> Path:
 
 
 def file_dataset(path: Path | str = IRIS, **extra) -> dict:
+    """A registry / inline dataset spec for the iris csv."""
     return {"source": "file", "path": str(path), "target": "species", **extra}
 
 
-def train_block(dataset_name: str = "iris", model: str = "random_forest", params: dict | None = None, **extra) -> dict:
+def registry(**extra) -> dict:
+    """``{"datasets": {"iris": ...}}`` with a recorded split, the common starting point."""
+    return {"datasets": {"iris": file_dataset(split={"test_size": 0.2, "stratify": True}, **extra)}}
+
+
+def node_train(dataset_name: str = "iris", model: str = "random_forest", params: dict | None = None, **extra) -> dict:
     block = {
         "type": "train",
         "datasets": [{"dataset_name": dataset_name}],
         "preprocessing": [{"step": "standard_scaler"}],
         "model": {"name": model, "params": params or {}},
-        "split": {"test_size": 0.2, "stratify": True},
         "seed": 7,
+    }
+    block.update(extra)
+    return block
+
+
+def node_test(**extra) -> dict:
+    block = {"type": "test", "datasets": [{"dataset_name": "iris"}]}
+    block.update(extra)
+    return block
+
+
+def node_eval(candidates: list | None = None, **extra) -> dict:
+    block = {
+        "type": "eval",
+        "datasets": [{"dataset_name": "iris"}],
+        "folds": {"k": 3},
+        "candidates": candidates or [{"name": "knn"}],
     }
     block.update(extra)
     return block

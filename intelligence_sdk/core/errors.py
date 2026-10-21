@@ -43,8 +43,3 @@ class RecipeValidationError(RecipeError):
         lines = [f"recipe has {len(self.errors)} problems:"]
         lines += [f"  - {RecipeError.__str__(e)}" for e in self.errors]
         return "\n".join(lines)
-
-
-class DatasetVersionMismatch(RecipeError):
-    """Test asked for the holdout of a model but the dataset on disk is not the one the
-    model was trained on. Re-deriving a split on different data is silent leakage."""

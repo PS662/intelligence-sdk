@@ -1,15 +1,18 @@
 """Recipe schema and loader.
 
 A recipe is a YAML mapping with two reserved keys - ``datasets`` (a registry of named
-dataset definitions) and ``runtime`` (which implementations run it) - and any number
-of user-named *sections*. Each section carries a ``type`` that selects its schema;
-new section types are added as members of the ``Section`` union.
+dataset specs) and ``runtime`` (which implementations run it) - and any number of
+user-named *nodes*. Each node carries a ``type`` that selects its schema: ``dataset``,
+``train``, ``test`` or ``eval``. New node types are added as members of the ``Node``
+union.
+
+Datasets are referential. A node's ``datasets`` list names registry entries or
+dataset nodes (``dataset_name``) or defines datasets inline (``name`` + spec). Every
+spec carries its own operations (filter, split, folds, save) and every node carries
+the same operations at its root, applied to the consolidated dataset it receives.
 
 Validation is fail-fast and every error names the config path that failed, with a
-did-you-mean suggestion when one can be computed.
-
-Section listing order drives implicit dependency chaining and topological tie-breaks
-(see ``core.dag``); ``yaml.safe_load`` preserves the order the user wrote.
+did-you-mean suggestion when one can be computed. Node listing order is kept.
 """
 
 from __future__ import annotations
@@ -17,26 +20,23 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from types import UnionType
-from typing import Annotated, Any, Literal, Union, get_args, get_origin
+from typing import Annotated, Any, ClassVar, Literal, Union, get_args, get_origin
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag, TypeAdapter, ValidationError, model_validator
 
 from intelligence_sdk.core.errors import RecipeError, RecipeValidationError, did_you_mean
 from intelligence_sdk.core.registry import ArtifactStoreKind, Backend, LibraryName, Model, Preprocessor, Scoring
 
 RESERVED_KEYS = {"datasets", "runtime"}
-SECTION_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
-
-
-# --------------------------------------------------------------------------- base
+NODE_TYPES = ("dataset", "train", "test", "eval")
+SOURCE_TYPES = ("file", "library", "dataset")
+NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
 class StrictModel(BaseModel):
     """Unknown keys are rejected by pydantic (``extra="forbid"``); the error converter
-    below turns each one into a config-path error with a did-you-mean suggestion
-    drawn from the failing model's own fields, while still reporting every other
-    problem in the recipe in the same pass."""
+    below turns each one into a config-path error with a did-you-mean suggestion."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -52,64 +52,142 @@ class RuntimeSpec(StrictModel):
     artifact_store: ArtifactStoreKind = ArtifactStoreKind.LOCAL
 
 
-_runtime_adapter = TypeAdapter(RuntimeSpec)
+# --------------------------------------------------------------- dataset options
 
 
-# ----------------------------------------------------------------------- datasets
+class SplitRef(StrictModel):
+    """Filter by a recorded split instead of an id list. Only a saved dataset
+    (``source: dataset``) carries a split to refer to."""
+
+    split: Literal["train", "test"]
+
+
+FilterIds = str | list[int | str] | SplitRef
 
 
 class FilterSpec(StrictModel):
-    """Row filter by id. ``include`` is applied before ``exclude``. Each may be a path
-    to a one-column CSV of ids or an inline list of ids."""
+    """Row filter by id. ``include`` is applied before ``exclude``. Each is a path to a
+    one-column CSV of ids, an inline list of ids, or ``{split: train|test}``."""
 
-    include: str | list[int | str] | None = None
-    exclude: str | list[int | str] | None = None
+    include: FilterIds | None = None
+    exclude: FilterIds | None = None
+
+    def uses_split(self) -> bool:
+        return isinstance(self.include, SplitRef) or isinstance(self.exclude, SplitRef)
 
 
-class FileDataset(StrictModel):
+class SplitSpec(StrictModel):
+    test_size: float = Field(default=0.2, gt=0.0, lt=1.0)
+    stratify: bool = True
+
+
+class FoldsSpec(StrictModel):
+    k: int = Field(default=5, ge=2)
+    stratify: bool = True
+
+
+class SaveSpec(StrictModel):
+    """Where to save a dataset. When ``path`` already holds one: ``overwrite`` rebuilds
+    it, ``reuse`` loads it instead of building, neither is an error."""
+
+    path: str
+    overwrite: bool = False
+    reuse: bool = False
+
+    @model_validator(mode="after")
+    def _one_policy(self) -> SaveSpec:
+        if self.overwrite and self.reuse:
+            raise ValueError("set at most one of 'overwrite' and 'reuse'")
+        return self
+
+
+class OpsMixin(StrictModel):
+    """Operations applied, in this order, to the dataset they are declared on."""
+
+    filter: FilterSpec | None = None
+    split: SplitSpec | None = None
+    folds: FoldsSpec | None = None
+    seed: int = 42
+
+
+class DatasetOps(OpsMixin):
+    save_dataset: SaveSpec | None = None
+
+    @model_validator(mode="after")
+    def _split_filter_needs_saved_source(self) -> DatasetOps:
+        if self.filter is not None and self.filter.uses_split() and getattr(self, "source", None) != "dataset":
+            raise ValueError("filter: a 'split' reference is only valid on a dataset with source: dataset")
+        return self
+
+
+class FileDataset(DatasetOps):
     source: Literal["file"]
     path: str
     target: str
     id_column: str | None = None
-    filter: FilterSpec | None = None
 
 
-class LibraryDataset(StrictModel):
+class LibraryDataset(DatasetOps):
     source: Literal["library"]
-    name: LibraryName
+    dataset: LibraryName
     target: str
-    filter: FilterSpec | None = None
 
 
-DatasetDef = Annotated[FileDataset | LibraryDataset, Field(discriminator="source")]
+class SavedDataset(DatasetOps):
+    """A dataset previously saved by this tool (``dataset.csv`` + ``metadata.json``)."""
+
+    source: Literal["dataset"]
+    path: str
 
 
-class DatasetRef(StrictModel):
-    """One entry of a section's ``datasets`` list: a registry reference
-    (``dataset_name``) or an inline definition (``dataset``), never both."""
-
-    dataset_name: str | None = None
-    dataset: DatasetDef | None = None
-    filter: FilterSpec | None = None
-    save: bool = False
-
-    @model_validator(mode="after")
-    def _exactly_one_source(self) -> DatasetRef:
-        if (self.dataset_name is None) == (self.dataset is None):
-            raise ValueError("set exactly one of 'dataset_name' (registry reference) or 'dataset' (inline definition)")
-        return self
+DatasetSpec = Annotated[FileDataset | LibraryDataset | SavedDataset, Field(discriminator="source")]
+AnyDataset = FileDataset | LibraryDataset | SavedDataset
 
 
-def _exactly_one_dataset(refs: list[DatasetRef] | None, field: str = "datasets") -> None:
-    if refs is None:
-        return
-    if len(refs) == 0:
-        raise ValueError(f"'{field}' must list exactly one dataset")
-    if len(refs) > 1:
-        raise ValueError(f"'{field}' lists {len(refs)} datasets; multi-dataset sections are not supported yet")
+# ------------------------------------------------------------------ dataset entries
 
 
-# --------------------------------------------------------------------- components
+class RefEntry(StrictModel):
+    """Reference to a registry entry or a dataset node by name."""
+
+    _tag: ClassVar[str] = "ref"
+    dataset_name: str
+
+
+class InlineEntry(BaseModel):
+    """A dataset defined in place: ``name`` plus the fields of a dataset spec."""
+
+    _tag: ClassVar[str] = "inline"
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    spec: DatasetSpec
+
+    @model_validator(mode="before")
+    @classmethod
+    def _flatten(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "spec" not in data:
+            data = dict(data)
+            name = data.pop("name", None)
+            if name is None:
+                hint = did_you_mean("dataset_name", [str(k) for k in data], cutoff=0.75)
+                if hint:
+                    raise ValueError(f"unknown field '{hint}' (did you mean 'dataset_name'?)")
+                raise ValueError("an inline dataset needs a 'name' (or use 'dataset_name' to reference one)")
+            return {"name": name, "spec": data}
+        return data
+
+
+def _entry_kind(value: Any) -> str:
+    return "ref" if isinstance(value, dict) and "dataset_name" in value else "inline"
+
+
+DatasetEntry = Annotated[
+    Annotated[RefEntry, Tag("ref")] | Annotated[InlineEntry, Tag("inline")],
+    Discriminator(_entry_kind),
+]
+
+
+# -------------------------------------------------------------------- components
 
 
 class StepSpec(StrictModel):
@@ -122,98 +200,140 @@ class ModelSpec(StrictModel):
     params: dict[str, Any] = Field(default_factory=dict)
 
     def grid_params(self) -> dict[str, list[Any]]:
-        """Parameters whose value is a list - the grid-search trigger."""
+        """Parameters whose value is a list - the search trigger."""
         return {k: v for k, v in self.params.items() if isinstance(v, list)}
 
 
-class SplitSpec(StrictModel):
-    test_size: float = Field(default=0.2, gt=0.0, lt=1.0)
-    stratify: bool = True
-
-
 class SearchSpec(StrictModel):
+    """Cross-validated search over list-valued hyperparameters, folded over the
+    rows the model is fitted on."""
+
     cv: int = Field(default=3, ge=2)
     scoring: Scoring = Scoring.ACCURACY
 
 
-# ----------------------------------------------------------------------- sections
+# ----------------------------------------------------------------------- outputs
 
 
-class SectionBase(StrictModel):
-    depends_on: list[str] = Field(default_factory=list)
-    output_dir: str = "artifacts"
+class OutputSpec(StrictModel):
+    save_path: str
+    overwrite: bool = False
 
 
-class TrainSection(SectionBase):
-    type: Literal["train"]
-    datasets: list[DatasetRef]
-    model: ModelSpec
-    preprocessing: list[StepSpec] = Field(default_factory=list)
-    split: SplitSpec = Field(default_factory=SplitSpec)
-    search: SearchSpec = Field(default_factory=SearchSpec)
-    seed: int = 42
+class DatasetOutput(OutputSpec):
+    """A dataset node's output is a saved dataset, with the same policy as ``save_dataset``."""
+
+    reuse: bool = False
 
     @model_validator(mode="after")
-    def _check(self) -> TrainSection:
-        _exactly_one_dataset(self.datasets)
+    def _one_policy(self) -> DatasetOutput:
+        if self.overwrite and self.reuse:
+            raise ValueError("set at most one of 'overwrite' and 'reuse'")
         return self
 
 
-class TestSection(SectionBase):
-    """Scores a trained model.
+class TrainOutput(OutputSpec):
+    pass
 
-    Model source: exactly one of an explicit ``depends_on`` naming a train section, or
-    ``model_path``. Dataset: omitted (inherited from the model's recorded dataset,
-    hash-checked, default ``rows: holdout``) or explicit (``rows: all`` by default,
-    never refused - this is the inference-on-new-data path).
-    """
+
+class TestOutput(OutputSpec):
+    pass
+
+
+class EvalOutput(OutputSpec):
+    pass
+
+
+# ------------------------------------------------------------------------- nodes
+
+
+class NodeBase(OpsMixin):
+    """Every node consumes a ``datasets`` list, consolidates it into one dataset and
+    applies its root-level operations to that dataset before acting."""
+
+    datasets: list[DatasetEntry] = Field(min_length=1)
+    ignore_duplicates: bool = False
+
+    @model_validator(mode="after")
+    def _root_filter_has_no_split_ref(self) -> NodeBase:
+        if self.filter is not None and self.filter.uses_split():
+            raise ValueError("filter: a 'split' reference is only valid inside a source: dataset entry")
+        return self
+
+    def entry_names(self) -> list[str]:
+        return [e.name for e in self.datasets if isinstance(e, InlineEntry)]
+
+    def references(self) -> list[str]:
+        return [e.dataset_name for e in self.datasets if isinstance(e, RefEntry)]
+
+
+class DatasetNode(NodeBase):
+    """Consolidates its datasets and saves the result. Runs when referenced or when
+    named with ``--node``."""
+
+    type: Literal["dataset"]
+    recipe_output: DatasetOutput | None = None
+
+
+class ActionNode(NodeBase):
+    depends_on: list[str] = Field(default_factory=list)
+    save_dataset: SaveSpec | None = None
+
+
+class TrainNode(ActionNode):
+    type: Literal["train"]
+    model: ModelSpec
+    preprocessing: list[StepSpec] = Field(default_factory=list)
+    hyperparam_search: SearchSpec = Field(default_factory=SearchSpec)
+    recipe_output: TrainOutput | None = None
+
+
+class TestNode(ActionNode):
+    """Scores a trained model on every row of its dataset. The model comes from
+    exactly one of an explicit ``depends_on`` naming a train node, or ``model_path``."""
 
     type: Literal["test"]
     model_path: str | None = None
-    datasets: list[DatasetRef] | None = None
-    rows: Literal["holdout", "all"] | None = None
+    recipe_output: TestOutput | None = None
 
     @model_validator(mode="after")
-    def _check(self) -> TestSection:
-        has_path = self.model_path is not None
-        has_dep = len(self.depends_on) > 0
-        if has_path == has_dep:
+    def _one_model_source(self) -> TestNode:
+        if (self.model_path is not None) == (len(self.depends_on) > 0):
             raise ValueError(
-                "a test section needs exactly one model source: either 'model_path' or an explicit "
-                "'depends_on' naming a train section"
+                "a test node needs exactly one model source: either 'model_path' or an explicit "
+                "'depends_on' naming a train node"
             )
-        _exactly_one_dataset(self.datasets)
         return self
 
 
-class EvalSection(SectionBase):
+class EvalNode(ActionNode):
+    """Compares candidate models with the folds recorded on its dataset."""
+
     type: Literal["eval"]
-    datasets: list[DatasetRef]
     candidates: list[ModelSpec] = Field(min_length=1)
     preprocessing: list[StepSpec] = Field(default_factory=list)
-    folds: int = Field(default=5, ge=2)
-    stratify: bool = True
     metrics: list[Scoring] | None = None
-    seed: int = 42
+    recipe_output: EvalOutput | None = None
 
     @model_validator(mode="after")
-    def _check(self) -> EvalSection:
-        _exactly_one_dataset(self.datasets)
+    def _scalar_candidates(self) -> EvalNode:
         for i, cand in enumerate(self.candidates):
             lists = cand.grid_params()
             if lists:
                 raise ValueError(
                     f"candidates[{i}].params.{next(iter(lists))}: eval candidates take scalar hyperparameters; "
-                    "use a train section with a list value to grid-search"
+                    "use a train node with a list value to search"
                 )
         return self
 
 
-Section = Annotated[TrainSection | TestSection | EvalSection, Field(discriminator="type")]
-SECTION_TYPES = ("train", "test", "eval")
+Node = Annotated[DatasetNode | TrainNode | TestNode | EvalNode, Field(discriminator="type")]
+AnyNode = DatasetNode | TrainNode | TestNode | EvalNode
+ActionNodeTypes = (TrainNode, TestNode, EvalNode)
 
-_section_adapter = TypeAdapter(Section)
-_dataset_adapter = TypeAdapter(DatasetDef)
+_node_adapter = TypeAdapter(Node)
+_dataset_adapter = TypeAdapter(DatasetSpec)
+_runtime_adapter = TypeAdapter(RuntimeSpec)
 
 
 # ------------------------------------------------------------------------- recipe
@@ -224,25 +344,38 @@ class Recipe(BaseModel):
 
     source: str = "<memory>"
     runtime: RuntimeSpec = Field(default_factory=RuntimeSpec)
-    datasets: dict[str, FileDataset | LibraryDataset] = Field(default_factory=dict)
-    sections: dict[str, TrainSection | TestSection | EvalSection] = Field(default_factory=dict)
+    datasets: dict[str, AnyDataset] = Field(default_factory=dict)
+    nodes: dict[str, AnyNode] = Field(default_factory=dict)
 
     @property
     def order(self) -> list[str]:
-        """Section names in listing order."""
-        return list(self.sections)
+        """Node names in listing order."""
+        return list(self.nodes)
 
-    def resolve_dataset(self, ref: DatasetRef, path: str) -> FileDataset | LibraryDataset:
-        if ref.dataset is not None:
-            return ref.dataset
-        name = ref.dataset_name
-        if name not in self.datasets:
-            raise RecipeError(
-                f"{path}.dataset_name",
-                f"unknown dataset '{name}'; registry has: {', '.join(self.datasets) or '(none)'}",
-                did_you_mean(name, self.datasets),
-            )
-        return self.datasets[name]
+    @property
+    def dataset_nodes(self) -> dict[str, DatasetNode]:
+        return {n: node for n, node in self.nodes.items() if isinstance(node, DatasetNode)}
+
+    @property
+    def action_nodes(self) -> dict[str, TrainNode | TestNode | EvalNode]:
+        return {n: node for n, node in self.nodes.items() if isinstance(node, ActionNodeTypes)}
+
+    def referenceable(self) -> list[str]:
+        return list(self.datasets) + list(self.dataset_nodes)
+
+    def lookup(self, name: str, path: str) -> AnyDataset | DatasetNode:
+        """The registry spec or dataset node a ``dataset_name`` refers to."""
+        if name in self.datasets:
+            return self.datasets[name]
+        if name in self.dataset_nodes:
+            return self.dataset_nodes[name]
+        if name in self.nodes:
+            raise RecipeError(path, f"'{name}' is a {self.nodes[name].type} node; only datasets can be referenced")
+        raise RecipeError(
+            path,
+            f"unknown dataset '{name}'; known: {', '.join(self.referenceable()) or '(none)'}",
+            did_you_mean(name, self.referenceable()),
+        )
 
 
 def load_recipe(path: str | Path) -> Recipe:
@@ -259,11 +392,9 @@ def load_recipe(path: str | Path) -> Recipe:
 
 def parse_recipe(data: Any, source: str = "<memory>") -> Recipe:
     if not isinstance(data, dict) or not data:
-        raise RecipeError("", "recipe must be a non-empty mapping of section names to blocks")
+        raise RecipeError("", "recipe must be a non-empty mapping of node names to blocks")
 
     errors: list[RecipeError] = []
-    datasets: dict[str, Any] = {}
-    sections: dict[str, Any] = {}
 
     runtime = RuntimeSpec()
     if "runtime" in data:
@@ -272,68 +403,105 @@ def parse_recipe(data: Any, source: str = "<memory>") -> Recipe:
         except ValidationError as exc:
             errors.extend(_convert(exc, prefix="runtime", root=RuntimeSpec))
 
+    datasets: dict[str, Any] = {}
     raw_datasets = data.get("datasets") or {}
     if not isinstance(raw_datasets, dict):
-        errors.append(RecipeError("datasets", "must be a mapping of dataset name to definition"))
+        errors.append(RecipeError("datasets", "must be a mapping of dataset name to spec"))
         raw_datasets = {}
     for name, raw in raw_datasets.items():
+        if not NAME_RE.match(str(name)):
+            errors.append(
+                RecipeError(f"datasets.{name}", "dataset names must be identifiers matching [A-Za-z_][A-Za-z0-9_-]*")
+            )
+            continue
         try:
             datasets[name] = _dataset_adapter.validate_python(raw)
         except ValidationError as exc:
-            errors.extend(_convert(exc, prefix=f"datasets.{name}", root=DatasetDef))
+            errors.extend(_convert(exc, prefix=f"datasets.{name}", root=DatasetSpec))
 
-    section_items = [(k, v) for k, v in data.items() if k not in RESERVED_KEYS]
-    if not section_items:
-        errors.append(RecipeError("", "recipe has no sections; add at least one block with a 'type'"))
-    for name, raw in section_items:
-        if not SECTION_NAME_RE.match(str(name)):
+    nodes: dict[str, Any] = {}
+    node_items = [(k, v) for k, v in data.items() if k not in RESERVED_KEYS]
+    if not node_items:
+        errors.append(RecipeError("", "recipe has no nodes; add at least one block with a 'type'"))
+    for name, raw in node_items:
+        if not NAME_RE.match(str(name)):
             errors.append(
                 RecipeError(
                     str(name),
-                    "section names must be identifiers matching [A-Za-z_][A-Za-z0-9_-]* "
-                    "(they become artifact directory names); 'datasets' and 'runtime' are reserved keys",
+                    "node names must be identifiers matching [A-Za-z_][A-Za-z0-9_-]* "
+                    "(they become directory names); 'datasets' and 'runtime' are reserved keys",
                 )
             )
             continue
         if not isinstance(raw, dict):
-            errors.append(RecipeError(name, "section must be a mapping with a 'type' field"))
+            errors.append(RecipeError(name, "node must be a mapping with a 'type' field"))
             continue
         if "type" not in raw:
-            errors.append(RecipeError(f"{name}.type", f"missing; one of {', '.join(SECTION_TYPES)}"))
+            errors.append(RecipeError(f"{name}.type", f"missing; one of {', '.join(NODE_TYPES)}"))
             continue
         try:
-            sections[name] = _section_adapter.validate_python(raw)
+            nodes[name] = _node_adapter.validate_python(raw)
         except ValidationError as exc:
-            errors.extend(_convert(exc, prefix=name, root=Section))
+            errors.extend(_convert(exc, prefix=name, root=Node))
 
     if errors:
         raise RecipeValidationError(errors)
 
-    recipe = Recipe(source=source, runtime=runtime, datasets=datasets, sections=sections)
-    _check_dataset_refs(recipe, errors)
+    recipe = Recipe(source=source, runtime=runtime, datasets=datasets, nodes=nodes)
+    _check_namespace(recipe, errors)
+    _check_references(recipe, errors)
     if errors:
         raise RecipeValidationError(errors)
     return recipe
 
 
-def _check_dataset_refs(recipe: Recipe, errors: list[RecipeError]) -> None:
-    for name, section in recipe.sections.items():
-        refs = getattr(section, "datasets", None) or []
-        for i, ref in enumerate(refs):
-            try:
-                recipe.resolve_dataset(ref, f"{name}.datasets[{i}]")
-            except RecipeError as exc:
-                errors.append(exc)
+def _check_namespace(recipe: Recipe, errors: list[RecipeError]) -> None:
+    """Registry keys, node names and inline names share one namespace."""
+    seen: dict[str, str] = {name: f"datasets.{name}" for name in recipe.datasets}
+    for name in recipe.nodes:
+        if name in seen:
+            errors.append(RecipeError(name, f"name already used by {seen[name]}"))
+        seen[name] = name
+    for node_name, node in recipe.nodes.items():
+        for i, entry in enumerate(node.datasets):
+            if isinstance(entry, InlineEntry):
+                where = f"{node_name}.datasets[{i}].name"
+                if not NAME_RE.match(entry.name):
+                    errors.append(
+                        RecipeError(where, "dataset names must be identifiers matching [A-Za-z_][A-Za-z0-9_-]*")
+                    )
+                elif entry.name in seen:
+                    errors.append(RecipeError(where, f"name '{entry.name}' already used by {seen[entry.name]}"))
+                seen[entry.name] = where
+
+
+def _check_references(recipe: Recipe, errors: list[RecipeError]) -> None:
+    for node_name, node in recipe.nodes.items():
+        for i, entry in enumerate(node.datasets):
+            if isinstance(entry, RefEntry):
+                try:
+                    recipe.lookup(entry.dataset_name, f"{node_name}.datasets[{i}].dataset_name")
+                except RecipeError as exc:
+                    errors.append(exc)
+
+
+def parse_dataset_spec(data: dict[str, Any], path: str = "dataset") -> AnyDataset:
+    """Validate a dataset spec given as a plain mapping."""
+    try:
+        return _dataset_adapter.validate_python(data)
+    except ValidationError as exc:
+        raise RecipeValidationError(_convert(exc, prefix=path, root=DatasetSpec)) from exc
 
 
 # ------------------------------------------------------------- error conversion
 
 
 _QUOTED = re.compile(r"'([^']*)'")
+_HIDDEN_FIELDS = {"spec"}  # wrapper fields that do not appear in the user's YAML
 
 
 def _unwrap(annotation: Any) -> list[Any]:
-    """Candidate model classes reachable from a type annotation (through Annotated,
+    """Model classes reachable from a type annotation (through Annotated,
     Optional/Union, list[...] and dict[str, ...])."""
     origin = get_origin(annotation)
     if origin is Annotated:
@@ -353,34 +521,10 @@ def _unwrap(annotation: Any) -> list[Any]:
     return []
 
 
-def _fields_at(root: Any, loc: tuple[Any, ...]) -> set[str] | None:
-    """Field names of the model that pydantic was validating at ``loc``.
-
-    Pydantic's loc interleaves field names, list/dict keys and, for discriminated
-    unions, the chosen tag. We walk the annotations the same way.
-    """
-    candidates = _unwrap(root)
-    for item in loc:
-        if not candidates:
-            return None
-        if isinstance(item, int):
-            continue  # list index: the element type was already unwrapped
-        tagged = [c for c in candidates if _tag_of(c) == item]
-        if tagged:
-            candidates = tagged
-            continue
-        if len(candidates) == 1 and isinstance(item, str) and item in candidates[0].model_fields:
-            candidates = _unwrap(candidates[0].model_fields[item].annotation)
-            continue
-        if isinstance(item, str) and not any(item in c.model_fields for c in candidates):
-            continue  # dict key (e.g. a dataset name) - element type already unwrapped
-        return None
-    if len(candidates) == 1:
-        return set(candidates[0].model_fields)
-    return None
-
-
 def _tag_of(model_cls: Any) -> str | None:
+    explicit = getattr(model_cls, "_tag", None)
+    if isinstance(explicit, str):
+        return explicit
     for disc in ("type", "source"):
         field = model_cls.model_fields.get(disc)
         if field is not None and get_origin(field.annotation) is Literal:
@@ -388,17 +532,33 @@ def _tag_of(model_cls: Any) -> str | None:
     return None
 
 
-def _loc_to_path(prefix: str, loc: tuple[Any, ...]) -> str:
-    parts = [prefix] if prefix else []
+def _walk(root: Any, loc: tuple[Any, ...]) -> tuple[list[str], set[str] | None]:
+    """Turn pydantic's loc into the user's config path and find the fields of the
+    model at its end. Pydantic's loc interleaves field names, list indexes, dict keys
+    and union tags; tags are recognised by position and dropped from the path."""
+    candidates = _unwrap(root)
+    parts: list[str] = []
     for item in loc:
-        # Pydantic inserts the chosen union tag (e.g. 'train') into loc; it is not a config key.
-        if isinstance(item, str) and item in SECTION_TYPES + ("file", "library"):
-            continue
         if isinstance(item, int):
-            parts[-1] = f"{parts[-1]}[{item}]" if parts else f"[{item}]"
-        else:
-            parts.append(str(item))
-    return ".".join(parts)
+            if parts:
+                parts[-1] = f"{parts[-1]}[{item}]"
+            else:
+                parts.append(f"[{item}]")
+            continue
+        item = str(item)
+        fielded = [c for c in candidates if item in c.model_fields]
+        tagged = [c for c in candidates if _tag_of(c) == item]
+        if tagged and not fielded:
+            candidates = tagged
+            continue
+        if fielded:
+            if item not in _HIDDEN_FIELDS:
+                parts.append(item)
+            candidates = _unwrap(fielded[0].model_fields[item].annotation)
+            continue
+        parts.append(item)  # dict key (a dataset name); element type already unwrapped
+    siblings = set(candidates[0].model_fields) - _HIDDEN_FIELDS if len(candidates) == 1 else None
+    return parts, siblings
 
 
 def _convert(exc: ValidationError, prefix: str, root: Any) -> list[RecipeError]:
@@ -417,6 +577,10 @@ def _convert(exc: ValidationError, prefix: str, root: Any) -> list[RecipeError]:
             if m2:
                 loc = loc + tuple(m2.group(1).split("."))
                 msg = m2.group(2)
+            m3 = re.match(r"(filter): (.*)", msg)
+            if m3:
+                loc = loc + ("filter",)
+                msg = m3.group(2)
         elif etype == "enum":
             expected = _QUOTED.findall(str(ctx.get("expected", "")))
             suggestion = did_you_mean(str(value), expected)
@@ -424,29 +588,26 @@ def _convert(exc: ValidationError, prefix: str, root: Any) -> list[RecipeError]:
         elif etype == "union_tag_invalid":
             tag = ctx.get("tag")
             expected = _QUOTED.findall(str(ctx.get("expected_tags", "")))
-            loc = loc + (ctx.get("discriminator", "type").strip("'"),)
+            loc = loc + (str(ctx.get("discriminator", "type")).strip("'"),)
             suggestion = did_you_mean(str(tag), expected)
-            msg = f"'{tag}' is not a known type; choose one of: {', '.join(expected)}"
+            msg = f"'{tag}' is not a known value; choose one of: {', '.join(expected)}"
         elif etype == "union_tag_not_found":
-            disc = ctx.get("discriminator", "'type'").strip("'")
+            disc = str(ctx.get("discriminator", "'type'")).strip("'")
             loc = loc + (disc,)
             msg = f"missing required field '{disc}'"
         elif etype == "missing":
             msg = "missing required field"
-        elif etype == "extra_forbidden":
-            siblings = _fields_at(root, loc[:-1])
+        elif etype == "too_short":
+            msg = f"needs at least {ctx.get('min_length', 1)} item(s)"
+
+        parts, siblings = _walk(root, loc[:-1] if etype == "extra_forbidden" else loc)
+        if etype == "extra_forbidden":
+            parts.append(str(loc[-1]))
             msg = f"unknown field '{loc[-1]}'"
             if siblings:
                 suggestion = did_you_mean(str(loc[-1]), siblings)
                 msg += f"; valid fields: {', '.join(sorted(siblings))}"
 
-        out.append(RecipeError(_loc_to_path(prefix, loc), msg, suggestion))
+        path = ".".join(([prefix] if prefix else []) + parts)
+        out.append(RecipeError(path, msg, suggestion))
     return out
-
-
-def parse_dataset_def(data: dict[str, Any], path: str = "dataset") -> FileDataset | LibraryDataset:
-    """Re-validate a dataset definition recorded in a run's ``dataset.json``."""
-    try:
-        return _dataset_adapter.validate_python(data)
-    except ValidationError as exc:
-        raise RecipeValidationError(_convert(exc, prefix=path, root=DatasetDef)) from exc

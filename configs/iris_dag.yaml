@@ -1,52 +1,74 @@
-# Multi-section recipe: a DAG of train -> test, test-on-new-data, eval.
-# Sections run in topological order; explicit depends_on carries meaning,
-# listing order only breaks ties.  Try: inspect --recipe configs/iris_dag.yaml
+# A dataset node that combines two sources, a train -> test chain that uses it, and an
+# isolated eval. Try: inspect --recipe configs/iris_dag.yaml, then run with --node test_rf.
 
 datasets:
-  iris_1:
+  iris:
     source: file
     path: data/iris.csv
     target: species
 
+prep:
+  type: dataset
+  datasets:
+    - dataset_name: iris                    # registry reference
+    - name: iris_extra                      # inline dataset; its own ids keep the rows distinct
+      source: file
+      path: data/iris_extra.csv
+      target: species
+      id_column: sample_id
+  split:                                    # root options act on the combined dataset
+    test_size: 0.2
+    stratify: true
+  folds:
+    k: 5
+    stratify: true
+  seed: 42
+  recipe_output:
+    save_path: data/derived/prep
+    overwrite: true
+
 train_rf:
   type: train
   datasets:
-    - dataset_name: iris_1
-  split:
-    test_size: 0.2
-    stratify: true
-  seed: 42
+    - dataset_name: prep                    # resolved (and saved) when this node runs
   preprocessing:
     - step: standard_scaler
   model:
     name: random_forest
     params:
       n_estimators: [20, 50]
+  hyperparam_search:
+    cv: 3
+    scoring: accuracy
+  seed: 42
+  recipe_output:
+    save_path: artifacts/train_rf
+    overwrite: true
 
 test_rf:
   type: test
-  depends_on: [train_rf]                    # explicit: model AND dataset inherited
-  rows: holdout
-
-test_new_data:
-  type: test
-  depends_on: [train_rf]                    # model inherited; dataset explicit -> rows: all, never refused
+  depends_on: [train_rf]                    # model source
   datasets:
-    - dataset:
-        source: file
-        path: data/iris.csv
-        target: species
-      save: true                            # persist the materialized frame into the run dir
+    - name: test_split
+      source: dataset
+      path: data/derived/prep
+      filter:
+        exclude:
+          split: train
+  recipe_output:
+    save_path: artifacts/test_rf
+    overwrite: true
 
 compare:
-  type: eval
-  depends_on: [train_rf]                    # ordering only
+  type: eval                                # no depends_on: isolated, runs after the DAG
   datasets:
-    - dataset_name: iris_1
-  folds: 5
-  seed: 42
+    - dataset_name: prep
   preprocessing:
     - step: standard_scaler
   candidates:
     - name: random_forest
     - name: logistic_regression
+  metrics: [accuracy, f1_macro]
+  recipe_output:
+    save_path: artifacts/compare
+    overwrite: true

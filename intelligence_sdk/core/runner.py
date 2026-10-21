@@ -2,11 +2,12 @@
 
 Two phases:
 
-1. **resolve** - everything that can be checked without touching data: DAG validity,
-   dataset references, component names, hyperparameter names, metric/model
-   compatibility, file existence. Any failure raises before a single row is read.
-2. **execute** - sections in topological order. Each leaves a run card in
-   its run directory and a ``SectionOutput`` for its dependants.
+1. **resolve** - everything that can be checked without touching data: both graphs,
+   dataset references, component and hyperparameter names, metric/model
+   compatibility, file existence. Any failure raises before a row is read.
+2. **execute** - the nodes of the execution plan, in order. Each node consolidates
+   its datasets through one shared ``DatasetResolver``, acts, and writes its
+   outputs when it has a ``recipe_output``.
 
 The runner depends on the ports only; ``runtime.build_runner`` supplies the
 implementations named by the recipe's ``runtime`` block.
@@ -26,36 +27,43 @@ import numpy as np
 import pandas as pd
 
 from intelligence_sdk.core import dag
-from intelligence_sdk.core.errors import DatasetVersionMismatch, RecipeError, RecipeValidationError, did_you_mean
-from intelligence_sdk.core.filters import apply_filter, filter_to_dict
+from intelligence_sdk.core.errors import RecipeError, RecipeValidationError, did_you_mean
 from intelligence_sdk.core.recipe import (
-    DatasetRef,
-    EvalSection,
+    AnyDataset,
+    DatasetNode,
+    EvalNode,
+    FilterSpec,
+    InlineEntry,
     ModelSpec,
+    NodeBase,
     Recipe,
+    RefEntry,
+    SavedDataset,
     StepSpec,
-    TestSection,
-    TrainSection,
-    parse_dataset_def,
+    TestNode,
+    TrainNode,
 )
 from intelligence_sdk.core.registry import Preprocessor, Scoring
-from intelligence_sdk.core.splits import SplitError, kfold_ids, train_test_split_ids
-from intelligence_sdk.core.types import LoadedDataset, SectionOutput, SplitRecord
+from intelligence_sdk.core.resolver import DatasetResolver
+from intelligence_sdk.core.splits import SplitError, kfold_ids
+from intelligence_sdk.core.types import (
+    Dataset,
+    DatasetResult,
+    EstimatorKind,
+    EvalResult,
+    NodeResult,
+    TestResult,
+    TrainResult,
+)
 from intelligence_sdk.interfaces import ArtifactStore, DataLoader, Evaluator, ModelBackend
 
 log = logging.getLogger("intelligence_sdk")
 
-DATASET_JSON = "dataset.json"
 MODEL_JSON = "model.json"
-DATASET_NOTE = (
-    "Dataset identity is a content hash computed by the loader (file bytes or canonical frame); "
-    "a loader backed by a dataset registry such as DVC supplies its stored hash instead. "
-    "A test run against a different hash is reported as leakage."
-)
 
 
 class Runner:
-    """Composition happens outside: pass any objects satisfying the ports."""
+    """Composition happens outside: pass any objects implementing the ports."""
 
     def __init__(
         self,
@@ -71,78 +79,140 @@ class Runner:
 
     # ------------------------------------------------------------------ public
 
-    def run(
-        self, recipe: Recipe, allow_dataset_mismatch: bool = False, output_dir: str | None = None
-    ) -> dict[str, SectionOutput]:
-        graph = dag.validated_graph(recipe)
+    def run(self, recipe: Recipe, node: str | None = None) -> dict[str, NodeResult]:
+        graph, _ = dag.validate(recipe)
         self.resolve(recipe)
-        order = dag.execution_order(graph)
-        log.info("recipe %s: %d section(s), order: %s", recipe.source, len(order), " -> ".join(order))
+        execution = dag.plan(recipe, graph, node)
+        if execution.target:
+            log.info("recipe %s: node %s (%s)", recipe.source, execution.target, " -> ".join(execution.ordered))
+        else:
+            log.info(
+                "recipe %s: %s%s",
+                recipe.source,
+                " -> ".join(execution.ordered) or "(no connected nodes)",
+                f"; then isolated: {', '.join(execution.isolated)}" if execution.isolated else "",
+            )
 
-        outputs: dict[str, SectionOutput] = {}
-        for name in order:
-            section = recipe.sections[name]
-            out_dir = output_dir or section.output_dir
-            log.info("== [%s] %s", section.type, name)
+        resolver = DatasetResolver(recipe, self.loaders, self.store)
+        results: dict[str, NodeResult] = {}
+        for name in execution.sequence:
+            spec = recipe.nodes[name]
             started = time.perf_counter()
-            if isinstance(section, TrainSection):
-                result = self._run_train(name, section, recipe, out_dir)
-            elif isinstance(section, TestSection):
-                result = self._run_test(name, section, recipe, outputs, out_dir, allow_dataset_mismatch)
-            elif isinstance(section, EvalSection):
-                result = self._run_eval(name, section, recipe, out_dir)
-            else:  # pragma: no cover - schema guarantees the union
-                raise RecipeError(name, f"unsupported section type {section.type}")
-            self._write_run_json(result, time.perf_counter() - started)
-            log.info("   artifacts: %s", result.run_dir)
-            outputs[name] = result
-        return outputs
+            if isinstance(spec, DatasetNode):
+                dataset = resolver.resolve_reference(name, "--node")
+                executed = next(e for e in resolver.executed if e.name == name)
+                result: NodeResult = DatasetResult(
+                    name=name, type="dataset", dataset=dataset, output_dir=executed.output_dir
+                )
+            else:
+                log.info("== [%s] %s", spec.type, name)
+                if isinstance(spec, TrainNode):
+                    result = self._run_train(name, spec, resolver)
+                elif isinstance(spec, TestNode):
+                    result = self._run_test(name, spec, recipe, resolver, results)
+                elif isinstance(spec, EvalNode):
+                    result = self._run_eval(name, spec, resolver)
+                else:  # pragma: no cover - schema guarantees the union
+                    raise RecipeError(name, f"unsupported node type {spec.type}")
+            self._bookkeeping(result, recipe, time.perf_counter() - started)
+            results[name] = result
+
+        for executed in resolver.executed:
+            if executed.name not in results:
+                extra = DatasetResult(
+                    name=executed.name, type="dataset", dataset=executed.dataset, output_dir=executed.output_dir
+                )
+                if not executed.reused:
+                    self._bookkeeping(extra, recipe, 0.0)
+                results[executed.name] = extra
+        return results
 
     def resolve(self, recipe: Recipe) -> None:
         """Fail fast on everything that does not need data."""
         errors: list[RecipeError] = []
-        for name, section in recipe.sections.items():
-            if isinstance(section, TrainSection):
-                self._check_components(name, section.preprocessing, [section.model], errors, allow_lists=True)
-                kind = self.backend.estimator_kind(section.model.name)
-                if section.search.scoring.kind != kind:
+        produced = self._produced_paths(recipe)
+
+        for name, spec in recipe.datasets.items():
+            self._check_spec(f"datasets.{name}", spec, produced, errors)
+        for name, node in recipe.nodes.items():
+            for i, entry in enumerate(node.datasets):
+                if isinstance(entry, InlineEntry):
+                    self._check_spec(f"{name}.datasets[{i}]", entry.spec, produced, errors)
+            self._check_filter_files(f"{name}.filter", node.filter, errors)
+
+            if isinstance(node, TrainNode):
+                self._check_components(name, node.preprocessing, [node.model], errors, single=True)
+                kind = self.backend.estimator_kind(node.model.name)
+                if node.hyperparam_search.scoring.kind != kind:
                     errors.append(
-                        _metric_mismatch(f"{name}.search.scoring", section.search.scoring, section.model, kind)
+                        _metric_mismatch(
+                            f"{name}.hyperparam_search.scoring", node.hyperparam_search.scoring, node.model, kind
+                        )
                     )
-                self._check_dataset_ref(name, section.datasets[0], recipe, errors)
-            elif isinstance(section, EvalSection):
-                self._check_components(name, section.preprocessing, section.candidates, errors, allow_lists=False)
-                for ci, cand in enumerate(section.candidates):
+            elif isinstance(node, EvalNode):
+                self._check_components(name, node.preprocessing, node.candidates, errors, single=False)
+                for ci, cand in enumerate(node.candidates):
                     kind = self.backend.estimator_kind(cand.name)
-                    for mi, metric in enumerate(section.metrics or []):
+                    for mi, metric in enumerate(node.metrics or []):
                         if metric.kind != kind:
                             errors.append(
                                 _metric_mismatch(f"{name}.metrics[{mi}]", metric, cand, kind, f"candidates[{ci}]")
                             )
-                self._check_dataset_ref(name, section.datasets[0], recipe, errors)
-            elif isinstance(section, TestSection):
-                if section.model_path is not None:
-                    model_dir = self.store.resolve(section.model_path)
-                    if not (model_dir / MODEL_JSON).exists():
-                        errors.append(
-                            RecipeError(
-                                f"{name}.model_path", f"no trained model at {section.model_path} (missing {MODEL_JSON})"
-                            )
+                if not self._folds_declared(recipe, node):
+                    errors.append(
+                        RecipeError(
+                            f"{name}.folds", "eval needs folds; add folds: {k: 5} on this node or on its dataset"
                         )
-                if section.datasets:
-                    self._check_dataset_ref(name, section.datasets[0], recipe, errors)
+                    )
+            elif isinstance(node, TestNode) and node.model_path is not None:
+                model_dir = Path(node.model_path)
+                if not (model_dir / MODEL_JSON).exists() and str(model_dir) not in produced:
+                    errors.append(
+                        RecipeError(f"{name}.model_path", f"no trained model at {model_dir} (missing {MODEL_JSON})")
+                    )
         if errors:
             raise RecipeValidationError(errors)
 
     # --------------------------------------------------------------- resolve
 
+    def _produced_paths(self, recipe: Recipe) -> set[str]:
+        """Paths some node or spec in this recipe will write, so a later consumer may name them."""
+        out: set[str] = set()
+        specs: list[AnyDataset] = list(recipe.datasets.values())
+        for node in recipe.nodes.values():
+            specs.extend(e.spec for e in node.datasets if isinstance(e, InlineEntry))
+            save = getattr(node, "save_dataset", None)
+            if save is not None:
+                out.add(str(Path(save.path)))
+            output = node.recipe_output
+            if output is not None:
+                out.add(str(Path(output.save_path)))
+        for spec in specs:
+            if spec.save_dataset is not None:
+                out.add(str(Path(spec.save_dataset.path)))
+        return out
+
+    def _check_spec(self, path: str, spec: AnyDataset, produced: set[str], errors: list[RecipeError]) -> None:
+        if spec.source == "file" and not Path(spec.path).exists():
+            errors.append(RecipeError(f"{path}.path", f"dataset file not found: {spec.path}"))
+        if isinstance(spec, SavedDataset) and not Path(spec.path).exists() and str(Path(spec.path)) not in produced:
+            errors.append(
+                RecipeError(
+                    f"{path}.path", f"no saved dataset at {spec.path} and nothing in this recipe saves one there"
+                )
+            )
+        self._check_filter_files(f"{path}.filter", spec.filter, errors)
+
+    def _check_filter_files(self, path: str, spec: FilterSpec | None, errors: list[RecipeError]) -> None:
+        if spec is None:
+            return
+        for key in ("include", "exclude"):
+            value = getattr(spec, key)
+            if isinstance(value, str) and not Path(value).exists():
+                errors.append(RecipeError(f"{path}.{key}", f"id file not found: {value}"))
+
     def _check_components(
-        self,
-        name: str,
-        preprocessing: list[StepSpec],
-        models: list[ModelSpec],
-        errors: list[RecipeError],
-        allow_lists: bool,
+        self, name: str, preprocessing: list[StepSpec], models: list[ModelSpec], errors: list[RecipeError], single: bool
     ) -> None:
         for i, step in enumerate(preprocessing):
             valid = self.backend.step_param_names(step.step)
@@ -157,7 +227,7 @@ class Runner:
                     )
         for ci, model in enumerate(models):
             valid = self.backend.param_names(model.name)
-            prefix = f"{name}.model.params" if len(models) == 1 and allow_lists else f"{name}.candidates[{ci}].params"
+            prefix = f"{name}.model.params" if single else f"{name}.candidates[{ci}].params"
             for key, value in model.params.items():
                 if key not in valid:
                     errors.append(
@@ -170,341 +240,239 @@ class Runner:
                 elif isinstance(value, list) and len(value) == 0:
                     errors.append(RecipeError(f"{prefix}.{key}", "search list is empty"))
 
-    def _check_dataset_ref(self, name: str, ref: DatasetRef, recipe: Recipe, errors: list[RecipeError]) -> None:
-        path = f"{name}.datasets[0]"
-        try:
-            definition = recipe.resolve_dataset(ref, path)
-        except RecipeError as exc:
-            errors.append(exc)
-            return
-        if definition.source == "file" and not Path(definition.path).exists():
-            where = f"datasets.{ref.dataset_name}.path" if ref.dataset_name else f"{path}.dataset.path"
-            errors.append(RecipeError(where, f"dataset file not found: {definition.path}"))
-        for spec, where in ((definition.filter, f"{path} definition filter"), (ref.filter, f"{path}.filter")):
-            if spec is None:
-                continue
-            for key in ("include", "exclude"):
-                value = getattr(spec, key)
-                if isinstance(value, str) and not Path(value).exists():
-                    errors.append(RecipeError(f"{where}.{key}", f"id file not found: {value}"))
+    def _folds_declared(self, recipe: Recipe, node: EvalNode) -> bool:
+        """Static answer where possible; a saved dataset may carry folds we cannot see."""
+        if node.folds is not None:
+            return True
+        if len(node.datasets) != 1:
+            return False
+        entry = node.datasets[0]
+        spec = entry.spec if isinstance(entry, InlineEntry) else recipe.lookup(entry.dataset_name, "")
+        if isinstance(spec, DatasetNode):
+            return spec.folds is not None or self._folds_declared(recipe, spec)  # type: ignore[arg-type]
+        return spec.folds is not None or spec.source == "dataset"
 
-    # --------------------------------------------------------------- shared
+    # ---------------------------------------------------------------- shared
 
-    def _load(self, name: str, ref: DatasetRef, recipe: Recipe, run_dir: Path) -> tuple[LoadedDataset, dict[str, Any]]:
-        """Shared load path for every section type: resolve → definition filter (loader)
-        → reference filter → optional materialization."""
-        path = f"{name}.datasets[0]"
-        definition = recipe.resolve_dataset(ref, path)
-        dataset = self.loaders[definition.source].load(definition)
-        dataset.frame = apply_filter(dataset.frame, ref.filter, f"{path}.filter")
-        if ref.save:
-            self.store.write_csv(run_dir, "data/materialized.csv", dataset.frame)
-        record = {
-            "version": dataset.version.to_dict(),
-            "definition": definition.model_dump(mode="json", exclude_none=True),
-            "reference_filter": filter_to_dict(ref.filter),
-            "n_rows_after_filters": int(len(dataset.frame)),
-        }
-        log.info(
-            "   dataset %s (%s) hash=%s rows=%d",
-            dataset.version.locator,
-            dataset.version.source,
-            dataset.version.hash[:12],
-            len(dataset.frame),
-        )
-        return dataset, record
-
-    def _check_frame(
-        self, name: str, dataset: LoadedDataset, definition_target: str, preprocessing: list[StepSpec]
-    ) -> None:
+    def _offer(
+        self, name: str, node: NodeBase, resolver: DatasetResolver, require_target: bool, preprocessing: list[StepSpec]
+    ) -> Dataset:
+        dataset = resolver.consolidate(name, node)
         frame = dataset.frame
-        if dataset.target is None:
-            raise RecipeError(
-                f"{name}.datasets[0]",
-                f"target column '{definition_target}' not in dataset; columns: {', '.join(map(str, frame.columns))}",
-                did_you_mean(definition_target, map(str, frame.columns)),
-            )
+        if dataset.y() is None:
+            if require_target:
+                raise RecipeError(
+                    f"{name}.datasets",
+                    f"target column '{dataset.target}' not in dataset; columns: {', '.join(map(str, frame.columns))}",
+                    did_you_mean(str(dataset.target), map(str, frame.columns)),
+                )
+        elif frame[dataset.target].isna().any():
+            raise RecipeError(f"{name}.datasets", f"target column '{dataset.target}' has missing values")
         non_numeric = [c for c in dataset.feature_columns if not pd.api.types.is_numeric_dtype(frame[c])]
         if non_numeric:
             raise RecipeError(
-                f"{name}.datasets[0]",
+                f"{name}.datasets",
                 f"non-numeric feature column(s): {', '.join(map(str, non_numeric))}; only numeric features are supported - drop or encode them before loading",
             )
-        if frame[dataset.target].isna().any():
-            raise RecipeError(f"{name}.datasets[0]", f"target column '{dataset.target}' has missing values")
         nan_cols = [c for c in dataset.feature_columns if frame[c].isna().any()]
-        has_imputer = any(step.step == Preprocessor.SIMPLE_IMPUTER for step in preprocessing)
-        if nan_cols and not has_imputer:
+        if nan_cols and not any(step.step == Preprocessor.SIMPLE_IMPUTER for step in preprocessing):
             raise RecipeError(
                 f"{name}.preprocessing",
                 f"feature column(s) with missing values: {', '.join(map(str, nan_cols))}; add a 'simple_imputer' step or filter those rows",
             )
+        return dataset
 
     def _fit_predict_score(
-        self,
-        section,
-        model: ModelSpec,
-        params: dict[str, Any],
-        X: pd.DataFrame,
-        y: pd.Series,
-        train_ids,
-        test_ids,
-        metrics: list[Scoring] | None,
+        self, preprocessing, model: ModelSpec, params, seed, dataset: Dataset, train_ids, test_ids, metrics
     ):
-        est = self.backend.build(section.preprocessing, model.name, params, section.seed)
+        X, y = dataset.X(), dataset.y()
+        est = self.backend.build(preprocessing, model.name, params, seed)
         est = self.backend.fit(est, X.loc[train_ids], y.loc[train_ids])
         pred = self.backend.predict(est, X.loc[test_ids])
         return est, pred, self.evaluator.evaluate(y.loc[test_ids].to_numpy(), pred, metrics)
 
-    # ---------------------------------------------------------------- train
+    def _output_dir(self, name: str, node) -> Path | None:
+        out = node.recipe_output
+        if out is None:
+            log.info("   no recipe_output: nothing written for %s", name)
+            return None
+        return self.store.prepare(out.save_path, out.overwrite, f"{name}.recipe_output.save_path")
 
-    def _run_train(self, name: str, section: TrainSection, recipe: Recipe, out_dir: str) -> SectionOutput:
-        run_dir = self.store.new_run(name, out_dir)
-        ref = section.datasets[0]
-        dataset, record = self._load(name, ref, recipe, run_dir)
-        self._check_frame(name, dataset, recipe.resolve_dataset(ref, name).target, section.preprocessing)
-        X, y = dataset.X(), dataset.y()
+    # ----------------------------------------------------------------- train
 
-        try:
-            train_ids, test_ids = train_test_split_ids(
-                dataset.ids.to_numpy(), y.to_numpy(), section.split.test_size, section.split.stratify, section.seed
-            )
-        except SplitError as exc:
-            raise RecipeError(f"{name}.split", str(exc)) from exc
-        split = SplitRecord(train_ids, test_ids, section.split.test_size, section.split.stratify, section.seed)
-        log.info(
-            "   split: %d train / %d holdout (stratify=%s, seed=%d)",
-            len(train_ids),
-            len(test_ids),
-            section.split.stratify,
-            section.seed,
-        )
+    def _run_train(self, name: str, node: TrainNode, resolver: DatasetResolver) -> TrainResult:
+        dataset = self._offer(name, node, resolver, True, node.preprocessing)
+        fit_frame = dataset.train_frame()
+        fit_ids = fit_frame.index.tolist()
+        log.info("   fitting on %d rows (%s)", len(fit_ids), "train split" if dataset.split else "all rows, no split")
 
-        grid = _expand_grid(section.model.params)
-        search_summary: dict[str, Any] = {"n_candidates": len(grid), "scoring": section.search.scoring.value}
-        best_params = grid[0]
+        grid = _expand_grid(node.model.params)
+        search: dict[str, Any] = {"n_candidates": len(grid), "scoring": node.hyperparam_search.scoring.value}
+        best_params, rows = grid[0], []
         if len(grid) > 1:
-            best_params, ranked = self._grid_search(name, section, X, y, train_ids, grid, run_dir)
-            search_summary.update({"cv": section.search.cv, "best_params": best_params, "ranking": ranked})
+            best_params, rows = self._grid_search(name, node, dataset, fit_ids, grid)
+            search.update({"cv": node.hyperparam_search.cv, "best_params": best_params, "ranking": rows})
 
-        est = self.backend.build(section.preprocessing, section.model.name, best_params, section.seed)
-        est = self.backend.fit(est, X.loc[train_ids], y.loc[train_ids])
-        pred = self.backend.predict(est, X.loc[test_ids])
-        holdout = self.evaluator.evaluate(y.loc[test_ids].to_numpy(), pred, None)
-        log.info("   holdout: %s", _fmt_metrics(holdout))
-
+        est = self.backend.build(node.preprocessing, node.model.name, best_params, node.seed)
+        est = self.backend.fit(est, dataset.X(fit_frame), dataset.y(fit_frame))
         model_meta = {
-            "section": name,
-            "model": section.model.name.value,
+            "node": name,
+            "model": node.model.name.value,
             "params": best_params,
-            "preprocessing": [s.model_dump(mode="json") for s in section.preprocessing],
+            "preprocessing": [s.model_dump(mode="json") for s in node.preprocessing],
             "features": dataset.feature_columns,
             "target": dataset.target,
-            "result_type": pred.result_type.value,
-            "seed": section.seed,
+            "result_type": self.backend.predict(est, dataset.X(fit_frame).head(1)).result_type.value,
+            "seed": node.seed,
+            "fitted_on": {"dataset": dataset.name, "rows": len(fit_ids), "split": "train" if dataset.split else "all"},
         }
-        self.backend.save(est, run_dir, model_meta)
-        dataset_json = {
-            "_note": DATASET_NOTE,
-            **record,
-            "id_column": getattr(recipe.resolve_dataset(ref, name), "id_column", None),
-            "target": dataset.target,
-            "features": dataset.feature_columns,
-            "split": split.to_dict(),
-        }
-        self.store.write_json(run_dir, DATASET_JSON, dataset_json)
-        metrics = {"holdout": holdout, "search": search_summary}
-        self.store.write_json(run_dir, "metrics.json", metrics)
-        self.store.write_csv(run_dir, "holdout_predictions.csv", pred.frame.assign(truth=y.loc[test_ids]))
-        self._write_resolved(run_dir, name, section, recipe)
-        self.store.set_latest(name, out_dir, run_dir)
-        return SectionOutput(
-            name=name, type="train", run_dir=run_dir, model_dir=run_dir, dataset_json=dataset_json, metrics=metrics
+        output_dir = self._output_dir(name, node)
+        if output_dir is not None:
+            self.backend.save(est, output_dir, model_meta)
+            self.store.write_json(output_dir, "metrics.json", {"search": search})
+            if rows:
+                table = pd.DataFrame(
+                    [
+                        {
+                            "rank": r["rank"],
+                            "candidate": r["candidate"],
+                            f"mean_{search['scoring']}": r["mean"],
+                            "std": r["std"],
+                            **{f"param_{k}": v for k, v in r["params"].items()},
+                        }
+                        for r in rows
+                    ]
+                )
+                self.store.write_csv(output_dir, "search_results.csv", table)
+                for r in rows:
+                    cand_dir = output_dir / "candidates" / f"{r['candidate']:03d}"
+                    self.store.write_json(cand_dir, "params.json", r["params"])
+                    self.store.write_json(
+                        cand_dir,
+                        "metrics.json",
+                        {
+                            "scoring": search["scoring"],
+                            "fold_scores": r["fold_scores"],
+                            "mean": r["mean"],
+                            "std": r["std"],
+                        },
+                    )
+        return TrainResult(
+            name=name,
+            type="train",
+            dataset=dataset,
+            output_dir=output_dir,
+            estimator=est,
+            model_meta=model_meta,
+            search=search,
         )
 
     def _grid_search(
-        self, name, section: TrainSection, X, y, train_ids, grid, run_dir
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        scoring = section.search.scoring
+        self, name: str, node: TrainNode, dataset: Dataset, fit_ids: list, grid: list[dict]
+    ) -> tuple[dict, list[dict]]:
+        scoring = node.hyperparam_search.scoring
+        stratify = self.backend.estimator_kind(node.model.name) == EstimatorKind.CLASSIFIER
         try:
             folds = kfold_ids(
-                np.asarray(train_ids),
-                y.loc[train_ids].to_numpy(),
-                section.search.cv,
-                section.split.stratify,
-                section.seed,
+                np.asarray(fit_ids), dataset.y().loc[fit_ids].to_numpy(), node.hyperparam_search.cv, stratify, node.seed
             )
         except SplitError as exc:
-            raise RecipeError(f"{name}.search.cv", str(exc)) from exc
-        log.info("   grid search: %d candidates x %d-fold CV on %s", len(grid), len(folds), scoring.value)
+            raise RecipeError(f"{name}.hyperparam_search.cv", str(exc)) from exc
+        log.info("   hyperparameter search: %d candidates x %d-fold CV on %s", len(grid), len(folds), scoring.value)
         rows = []
         for i, params in enumerate(grid):
-            scores = []
-            for tr, te in folds:
-                _, _, m = self._fit_predict_score(section, section.model, params, X, y, tr, te, [scoring])
-                scores.append(m[scoring.value])
+            scores = [
+                self._fit_predict_score(node.preprocessing, node.model, params, node.seed, dataset, tr, te, [scoring])[
+                    2
+                ][scoring.value]
+                for tr, te in folds
+            ]
             mean, std = float(np.mean(scores)), float(np.std(scores))
-            cand_dir = run_dir / "candidates" / f"{i:03d}"
-            self.store.write_json(cand_dir, "params.json", params)
-            self.store.write_json(
-                cand_dir, "metrics.json", {"scoring": scoring.value, "fold_scores": scores, "mean": mean, "std": std}
-            )
-            rows.append({"candidate": i, "params": params, "mean": mean, "std": std})
+            rows.append({"candidate": i, "params": params, "fold_scores": scores, "mean": mean, "std": std})
             log.info("     [%03d] %s -> %.4f ± %.4f", i, params, mean, std)
         rows.sort(key=lambda r: r["mean"], reverse=scoring.higher_is_better)
-        for rank, row in enumerate(rows):
-            row["rank"] = rank + 1
-        table = pd.DataFrame(
-            [
-                {
-                    "rank": r["rank"],
-                    "candidate": r["candidate"],
-                    f"mean_{scoring.value}": r["mean"],
-                    "std": r["std"],
-                    **{f"param_{k}": v for k, v in r["params"].items()},
-                }
-                for r in rows
-            ]
-        )
-        self.store.write_csv(run_dir, "search_results.csv", table)
+        for rank, row in enumerate(rows, 1):
+            row["rank"] = rank
         best = rows[0]
         log.info("   BEST: candidate %03d %s (%s=%.4f)", best["candidate"], best["params"], scoring.value, best["mean"])
         return best["params"], rows
 
-    # ----------------------------------------------------------------- test
+    # ------------------------------------------------------------------ test
 
     def _run_test(
-        self,
-        name: str,
-        section: TestSection,
-        recipe: Recipe,
-        outputs: dict[str, SectionOutput],
-        out_dir: str,
-        allow_mismatch: bool,
-    ) -> SectionOutput:
-        run_dir = self.store.new_run(name, out_dir)
-        if section.model_path is not None:
-            model_dir = self.store.resolve(section.model_path)
+        self, name: str, node: TestNode, recipe: Recipe, resolver: DatasetResolver, results: dict[str, NodeResult]
+    ) -> TestResult:
+        if node.model_path is not None:
+            model_dir = Path(node.model_path)
+            model_meta = self.store.read_json(model_dir / MODEL_JSON)
+            est = self.backend.load(model_dir)
+            log.info("   model: %s (%s) from %s", model_meta["model"], model_meta["result_type"], model_dir)
         else:
             dep = dag.explicit_train_dependency(recipe, name)
-            model_dir = outputs[dep].model_dir
-        model_meta = self.store.read_json(model_dir / MODEL_JSON)
-        trained = self.store.read_json(model_dir / DATASET_JSON)
-        recorded_hash = trained["version"]["hash"]
-        log.info("   model: %s (%s) from %s", model_meta["model"], model_meta["result_type"], model_dir)
+            trained = results[dep]
+            assert isinstance(trained, TrainResult)
+            est, model_meta = trained.estimator, trained.model_meta
+            log.info("   model: %s (%s) from node %s", model_meta["model"], model_meta["result_type"], dep)
 
-        inherited = section.datasets is None
-        if inherited:
-            definition = parse_dataset_def(trained["definition"], f"{model_dir / DATASET_JSON}:definition")
-            dataset = self.loaders[definition.source].load(definition)
-            ref_filter = trained.get("reference_filter")
-            if ref_filter:
-                from intelligence_sdk.core.recipe import FilterSpec
-
-                dataset.frame = apply_filter(dataset.frame, FilterSpec(**ref_filter), f"{name} recorded filter")
-            rows = section.rows or "holdout"
-            hash_match = dataset.version.hash == recorded_hash
-            if not hash_match:
-                msg = (
-                    f"dataset {dataset.version.locator} hash {dataset.version.hash[:12]} != hash {recorded_hash[:12]} the model was trained on; "
-                    "the recorded holdout no longer identifies the same rows (leakage risk)"
-                )
-                if not allow_mismatch:
-                    raise DatasetVersionMismatch(
-                        name,
-                        msg
-                        + ". Re-run with --allow-dataset-mismatch to score anyway, or give the test its own datasets block with rows: all",
-                    )
-                log.warning("   %s (continuing: --allow-dataset-mismatch)", msg)
-            record = {
-                "version": dataset.version.to_dict(),
-                "definition": definition.model_dump(mode="json", exclude_none=True),
-                "reference_filter": ref_filter,
-            }
-        else:
-            dataset, record = self._load(name, section.datasets[0], recipe, run_dir)
-            rows = section.rows or "all"
-            hash_match = dataset.version.hash == recorded_hash
-            if rows == "holdout" and not hash_match:
-                raise RecipeError(
-                    f"{name}.rows",
-                    "holdout is only meaningful on the dataset the model was trained on (hash differs); use rows: all",
-                )
-
-        if rows == "holdout":
-            wanted = trained["split"]["test_ids"]
-            missing = [i for i in wanted if i not in dataset.frame.index]
-            if missing:
-                raise RecipeError(
-                    name,
-                    f"{len(missing)} recorded holdout row id(s) are not in the loaded dataset (e.g. {missing[:5]})",
-                )
-            frame = dataset.frame.loc[wanted]
-        else:
-            frame = dataset.frame
+        dataset = self._offer(name, node, resolver, False, [])
         features = model_meta["features"]
-        absent = [c for c in features if c not in frame.columns]
+        absent = [c for c in features if c not in dataset.frame.columns]
         if absent:
             raise RecipeError(
-                f"{name}.datasets[0]",
+                f"{name}.datasets",
                 f"dataset lacks feature column(s) the model needs: {', '.join(absent)}",
-                did_you_mean(absent[0], map(str, frame.columns)),
+                did_you_mean(absent[0], map(str, dataset.frame.columns)),
             )
-        log.info("   scoring %d rows (%s)", len(frame), rows)
+        log.info("   scoring %d rows", len(dataset.frame))
 
-        est = self.backend.load(model_dir)
-        pred = self.backend.predict(est, frame[features])
-        target = model_meta["target"]
+        pred = self.backend.predict(est, dataset.frame[features])
+        y = dataset.y()
         metrics: dict[str, Any] = {}
-        if target in frame.columns:
-            metrics = self.evaluator.evaluate(frame[target].to_numpy(), pred, None)
+        predictions = pred.frame
+        if y is not None:
+            metrics = self.evaluator.evaluate(y.to_numpy(), pred, None)
+            predictions = predictions.assign(truth=y)
             log.info("   metrics: %s", _fmt_metrics(metrics))
-            self.store.write_csv(run_dir, "predictions.csv", pred.frame.assign(truth=frame[target]))
         else:
-            log.info("   no '%s' column present: predictions only, no metrics", target)
-            self.store.write_csv(run_dir, "predictions.csv", pred.frame)
-        self.store.write_json(run_dir, "metrics.json", metrics)
-        dataset_json = {
-            "_note": DATASET_NOTE,
-            "scored": {
-                **record,
-                "rows": rows,
-                "n_rows": int(len(frame)),
-                "row_ids": frame.index.tolist(),
-                "inherited": inherited,
-            },
-            "model": {"dir": str(model_dir), "trained_on": trained["version"], "hash_match": hash_match},
-        }
-        self.store.write_json(run_dir, DATASET_JSON, dataset_json)
-        self._write_resolved(
-            run_dir, name, section, recipe, extra={"resolved_model_dir": str(model_dir), "resolved_rows": rows}
-        )
-        self.store.set_latest(name, out_dir, run_dir)
-        return SectionOutput(
-            name=name, type="test", run_dir=run_dir, model_dir=model_dir, dataset_json=dataset_json, metrics=metrics
+            log.info("   no '%s' column: predictions only", model_meta["target"])
+
+        output_dir = self._output_dir(name, node)
+        if output_dir is not None:
+            self.store.write_csv(output_dir, "predictions.csv", predictions)
+            self.store.write_json(output_dir, "metrics.json", metrics)
+            self.store.write_json(
+                output_dir,
+                "model.json",
+                {
+                    **model_meta,
+                    "loaded_from": str(node.model_path)
+                    if node.model_path
+                    else f"node:{dag.explicit_train_dependency(recipe, name)}",
+                },
+            )
+        return TestResult(
+            name=name, type="test", dataset=dataset, output_dir=output_dir, predictions=predictions, metrics=metrics
         )
 
-    # ----------------------------------------------------------------- eval
+    # ------------------------------------------------------------------ eval
 
-    def _run_eval(self, name: str, section: EvalSection, recipe: Recipe, out_dir: str) -> SectionOutput:
-        run_dir = self.store.new_run(name, out_dir)
-        ref = section.datasets[0]
-        dataset, record = self._load(name, ref, recipe, run_dir)
-        self._check_frame(name, dataset, recipe.resolve_dataset(ref, name).target, section.preprocessing)
-        X, y = dataset.X(), dataset.y()
-        try:
-            folds = kfold_ids(dataset.ids.to_numpy(), y.to_numpy(), section.folds, section.stratify, section.seed)
-        except SplitError as exc:
-            raise RecipeError(f"{name}.folds", str(exc)) from exc
-        log.info(
-            "   %d-fold CV (stratify=%s) over %d candidate(s)", len(folds), section.stratify, len(section.candidates)
-        )
+    def _run_eval(self, name: str, node: EvalNode, resolver: DatasetResolver) -> EvalResult:
+        dataset = self._offer(name, node, resolver, True, node.preprocessing)
+        if dataset.folds is None:
+            raise RecipeError(
+                f"{name}.folds",
+                f"dataset '{dataset.name}' has no folds; add folds: {{k: 5}} on this node or on its dataset",
+            )
+        pairs = dataset.folds.pairs(dataset.ids)
+        log.info("   %d-fold CV over %d candidate(s) on %d rows", len(pairs), len(node.candidates), len(dataset.frame))
 
         rows = []
-        for ci, cand in enumerate(section.candidates):
-            for fi, (tr, te) in enumerate(folds):
-                _, _, m = self._fit_predict_score(section, cand, cand.params, X, y, tr, te, section.metrics)
-                scalars = {k: v for k, v in m.items() if isinstance(v, (int, float))}
+        for ci, cand in enumerate(node.candidates):
+            for fi, (tr, te) in enumerate(pairs):
+                _, _, m = self._fit_predict_score(
+                    node.preprocessing, cand, cand.params, node.seed, dataset, tr, te, node.metrics
+                )
+                scalars = {k: v for k, v in m.items() if isinstance(v, int | float)}
                 rows.append(
                     {
                         "candidate": f"{ci}:{cand.name.value}",
@@ -528,54 +496,49 @@ class Runner:
         primary = metric_cols[0]
         summary = summary.sort_values(f"{primary}_mean", ascending=False).reset_index(drop=True)
         summary.insert(0, "rank", range(1, len(summary) + 1))
-
-        self.store.write_csv(run_dir, "eval_report.csv", report)
-        self.store.write_csv(run_dir, "eval_summary.csv", summary)
-        self.store.write_json(
-            run_dir,
-            "folds.json",
-            {
-                "folds": section.folds,
-                "stratify": section.stratify,
-                "seed": section.seed,
-                "fold_test_ids": [te for _, te in folds],
-            },
-        )
-        self.store.write_json(
-            run_dir,
-            DATASET_JSON,
-            {"_note": DATASET_NOTE, **record, "target": dataset.target, "features": dataset.feature_columns},
-        )
-        metrics = {"ranked_by": primary, "summary": summary.to_dict(orient="records")}
-        self.store.write_json(run_dir, "metrics.json", metrics)
-        self._write_resolved(run_dir, name, section, recipe)
-        self.store.set_latest(name, out_dir, run_dir)
         log.info("   summary (ranked by %s):\n%s", primary, summary.to_string(index=False))
-        return SectionOutput(name=name, type="eval", run_dir=run_dir, dataset_json=record, metrics=metrics)
 
-    # -------------------------------------------------------------- helpers
-
-    def _write_resolved(
-        self, run_dir: Path, name: str, section, recipe: Recipe, extra: dict[str, Any] | None = None
-    ) -> None:
-        block = section.model_dump(mode="json", exclude_none=True)
-        refs = getattr(section, "datasets", None) or []
-        for i, ref in enumerate(refs):
-            block["datasets"][i]["resolved"] = recipe.resolve_dataset(ref, name).model_dump(
-                mode="json", exclude_none=True
+        output_dir = self._output_dir(name, node)
+        if output_dir is not None:
+            self.store.write_csv(output_dir, "eval_report.csv", report)
+            self.store.write_csv(output_dir, "eval_summary.csv", summary)
+            self.store.write_json(
+                output_dir, "metrics.json", {"ranked_by": primary, "summary": summary.to_dict(orient="records")}
             )
-        payload = {"recipe": recipe.source, "section": name, **(extra or {}), "block": block}
-        self.store.write_yaml(run_dir, "resolved_recipe.yaml", payload)
+        return EvalResult(
+            name=name, type="eval", dataset=dataset, output_dir=output_dir, report=report, summary=summary
+        )
 
-    def _write_run_json(self, result: SectionOutput, seconds: float) -> None:
+    # --------------------------------------------------------------- helpers
+
+    def _bookkeeping(self, result: NodeResult, recipe: Recipe, seconds: float) -> None:
+        if result.output_dir is None:
+            return
+        node = recipe.nodes[result.name]
+        block = node.model_dump(mode="json", exclude_none=True, exclude={"datasets"})
+        block["datasets"] = []
+        for entry in node.datasets:
+            if isinstance(entry, RefEntry):
+                target = recipe.lookup(entry.dataset_name, "")
+                resolved = (
+                    {"node": entry.dataset_name}
+                    if isinstance(target, DatasetNode)
+                    else target.model_dump(mode="json", exclude_none=True)
+                )
+                block["datasets"].append({"dataset_name": entry.dataset_name, "resolved": resolved})
+            else:
+                block["datasets"].append({"name": entry.name, **entry.spec.model_dump(mode="json", exclude_none=True)})
+        self.store.write_yaml(
+            result.output_dir, "resolved_recipe.yaml", {"recipe": recipe.source, "node": result.name, "block": block}
+        )
+        self.store.write_json(result.output_dir, "dataset_metadata.json", result.dataset.to_metadata())
         import sklearn  # version stamp only; the runner itself never calls into it
 
         self.store.write_json(
-            result.run_dir,
+            result.output_dir,
             "run.json",
             {
-                "run_id": result.run_dir.name,
-                "section": result.name,
+                "node": result.name,
                 "type": result.type,
                 "finished_at": datetime.now(UTC).isoformat(),
                 "duration_s": round(seconds, 3),
@@ -587,6 +550,7 @@ class Runner:
                 },
             },
         )
+        log.info("   outputs: %s", result.output_dir)
 
 
 def _expand_grid(params: dict[str, Any]) -> list[dict[str, Any]]:

@@ -29,42 +29,102 @@ class EstimatorKind(StrEnum):
     REGRESSOR = "regressor"
 
 
-@dataclass(frozen=True)
-class DatasetVersion:
-    """Identity of the data a model was trained on: a content hash plus origin details.
-
-    The loader computes it - file bytes for csv, the canonical frame for library
-    datasets - and a loader backed by a dataset registry such as DVC supplies the hash
-    it already stores. A test run against a different hash is reported as leakage.
-    """
-
-    source: str
-    locator: str
-    hash: str
-    n_rows: int
-    columns: list[str]
-    origin: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "source": self.source,
-            "locator": self.locator,
-            "hash": self.hash,
-            "n_rows": self.n_rows,
-            "columns": list(self.columns),
-            "origin": dict(self.origin),
-        }
+# ------------------------------------------------------------------------ dataset
 
 
 @dataclass
-class LoadedDataset:
-    """A materialized dataset. ``frame.index`` holds the row identifiers (original CSV
-    index or the configured id column). Filters subset the frame but never renumber
-    it, so every recorded row id is stable across train and test."""
+class Split:
+    """A train/test partition recorded by row id."""
 
+    test_size: float
+    stratify: bool
+    seed: int
+    train_ids: list[Any]
+    test_ids: list[Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "test_size": self.test_size,
+            "stratify": self.stratify,
+            "seed": self.seed,
+            "train_ids": list(self.train_ids),
+            "test_ids": list(self.test_ids),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Split:
+        return cls(
+            test_size=float(data["test_size"]),
+            stratify=bool(data["stratify"]),
+            seed=int(data["seed"]),
+            train_ids=list(data["train_ids"]),
+            test_ids=list(data["test_ids"]),
+        )
+
+    def restricted(self, ids: pd.Index) -> Split:
+        keep = set(ids.tolist())
+        return Split(
+            self.test_size,
+            self.stratify,
+            self.seed,
+            [i for i in self.train_ids if i in keep],
+            [i for i in self.test_ids if i in keep],
+        )
+
+
+@dataclass
+class Folds:
+    """A k-fold assignment recorded as the test ids of each fold."""
+
+    k: int
+    stratify: bool
+    seed: int
+    fold_test_ids: list[list[Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "k": self.k,
+            "stratify": self.stratify,
+            "seed": self.seed,
+            "fold_test_ids": [list(f) for f in self.fold_test_ids],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Folds:
+        return cls(
+            k=int(data["k"]),
+            stratify=bool(data["stratify"]),
+            seed=int(data["seed"]),
+            fold_test_ids=[list(f) for f in data["fold_test_ids"]],
+        )
+
+    def pairs(self, ids: pd.Index) -> list[tuple[list[Any], list[Any]]]:
+        """(train_ids, test_ids) per fold over the ids present in ``ids``."""
+        present = ids.tolist()
+        out = []
+        for test in self.fold_test_ids:
+            test_set = set(test)
+            out.append(([i for i in present if i not in test_set], [i for i in present if i in test_set]))
+        return out
+
+    def restricted(self, ids: pd.Index) -> Folds:
+        keep = set(ids.tolist())
+        return Folds(self.k, self.stratify, self.seed, [[i for i in f if i in keep] for f in self.fold_test_ids])
+
+
+@dataclass
+class Dataset:
+    """A materialized dataset. ``frame.index`` holds the row ids (positional
+    ``row_id`` or the configured id column) and is unique. ``split`` and ``folds``
+    are recorded by those ids, so a filter keeps them consistent by restriction."""
+
+    name: str
     frame: pd.DataFrame
     target: str | None
-    version: DatasetVersion
+    split: Split | None = None
+    folds: Folds | None = None
+    lineage: list[str] = field(default_factory=list)
+    filters: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ids(self) -> pd.Index:
@@ -74,13 +134,63 @@ class LoadedDataset:
     def feature_columns(self) -> list[str]:
         return [c for c in self.frame.columns if c != self.target]
 
-    def X(self) -> pd.DataFrame:
-        return self.frame[self.feature_columns]
+    def X(self, frame: pd.DataFrame | None = None) -> pd.DataFrame:
+        return (self.frame if frame is None else frame)[self.feature_columns]
 
-    def y(self) -> pd.Series | None:
-        if self.target is None or self.target not in self.frame.columns:
+    def y(self, frame: pd.DataFrame | None = None) -> pd.Series | None:
+        source = self.frame if frame is None else frame
+        if self.target is None or self.target not in source.columns:
             return None
-        return self.frame[self.target]
+        return source[self.target]
+
+    def train_frame(self) -> pd.DataFrame:
+        """Rows a model is fitted on: the train split, or everything without a split."""
+        return self.frame.loc[self.split.train_ids] if self.split else self.frame
+
+    def test_frame(self) -> pd.DataFrame | None:
+        return self.frame.loc[self.split.test_ids] if self.split else None
+
+    def restrict(self, ids: list[Any]) -> Dataset:
+        """Keep only ``ids`` (in current order); split and folds follow."""
+        keep = self.frame.index.isin(ids)
+        frame = self.frame[keep]
+        return Dataset(
+            name=self.name,
+            frame=frame,
+            target=self.target,
+            split=self.split.restricted(frame.index) if self.split else None,
+            folds=self.folds.restricted(frame.index) if self.folds else None,
+            lineage=list(self.lineage),
+            filters=list(self.filters),
+        )
+
+    def to_metadata(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "target": self.target,
+            "id_column": self.frame.index.name,
+            "columns": [str(c) for c in self.frame.columns],
+            "n_rows": int(len(self.frame)),
+            "lineage": list(self.lineage),
+            "filters": list(self.filters),
+            "split": self.split.to_dict() if self.split else None,
+            "folds": self.folds.to_dict() if self.folds else None,
+        }
+
+    @classmethod
+    def from_metadata(cls, frame: pd.DataFrame, meta: dict[str, Any]) -> Dataset:
+        return cls(
+            name=meta["name"],
+            frame=frame,
+            target=meta.get("target"),
+            split=Split.from_dict(meta["split"]) if meta.get("split") else None,
+            folds=Folds.from_dict(meta["folds"]) if meta.get("folds") else None,
+            lineage=list(meta.get("lineage", [])),
+            filters=list(meta.get("filters", [])),
+        )
+
+
+# --------------------------------------------------------------------- predictions
 
 
 @dataclass
@@ -96,34 +206,38 @@ class PredictionResult:
         return self.frame["prediction"].to_numpy()
 
 
-@dataclass
-class SplitRecord:
-    """The train/holdout split as an artifact: computed once at train time and
-    recorded by row id. Consumers select by these ids; they never re-split."""
-
-    train_ids: list[Any]
-    test_ids: list[Any]
-    test_size: float
-    stratify: bool
-    seed: int
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "train_ids": list(self.train_ids),
-            "test_ids": list(self.test_ids),
-            "test_size": self.test_size,
-            "stratify": self.stratify,
-            "seed": self.seed,
-        }
+# ------------------------------------------------------------------- node results
 
 
-@dataclass
-class SectionOutput:
-    """What one executed section leaves behind for its dependants."""
+@dataclass(kw_only=True)
+class NodeResult:
+    """What an executed node leaves behind for its dependants and the caller."""
 
     name: str
     type: str
-    run_dir: Path
-    model_dir: Path | None = None
-    dataset_json: dict[str, Any] | None = None
-    metrics: dict[str, Any] = field(default_factory=dict)
+    dataset: Dataset
+    output_dir: Path | None = None
+
+
+@dataclass(kw_only=True)
+class DatasetResult(NodeResult):
+    pass
+
+
+@dataclass(kw_only=True)
+class TrainResult(NodeResult):
+    estimator: Any
+    model_meta: dict[str, Any]
+    search: dict[str, Any]
+
+
+@dataclass(kw_only=True)
+class TestResult(NodeResult):
+    predictions: pd.DataFrame
+    metrics: dict[str, Any]
+
+
+@dataclass(kw_only=True)
+class EvalResult(NodeResult):
+    report: pd.DataFrame
+    summary: pd.DataFrame

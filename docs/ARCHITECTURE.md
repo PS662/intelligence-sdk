@@ -1,8 +1,8 @@
 # Architecture
 
-A recipe is validated completely before any data is read, then executed section by
-section in topological order. Each section leaves a run card and hands a
-`SectionOutput` to its dependants.
+A recipe is validated completely before any data is read, then executed node by
+node. Every node consolidates the datasets it names into one dataset, applies its own
+dataset operations to it, acts, and writes a run card when it has a `recipe_output`.
 
 ## Overview
 
@@ -16,15 +16,16 @@ flowchart LR
         RT[runtime/<br/>providers → wired Runner]
         subgraph core
             R[recipe.py<br/>schema + did-you-mean]
-            D[dag.py<br/>explicit vs implicit edges]
-            RU[runner.py<br/>resolve → train / test / eval]
-            S[splits.py · filters.py]
+            D[dag.py<br/>dependency + reference graphs]
+            RS[resolver.py<br/>recursive datasets, save policy]
+            RU[runner.py<br/>resolve → dataset / train / test / eval]
+            S[dataset_ops.py · splits.py]
         end
         subgraph interfaces
             I[DataLoader · ModelBackend<br/>ArtifactStore · Evaluator]
         end
         subgraph adapters
-            A1[loaders: csv, library]
+            A1[loaders: csv, library, saved]
             A2[sklearn_backend]
             A3[local_artifacts]
             A4[evaluator]
@@ -33,8 +34,10 @@ flowchart LR
     CLI --> F --> RT
     RT --> RU
     RT --> A1 & A2 & A3 & A4
-    RU --> R & D & S
+    RU --> R & D & RS
+    RS --> S
     RU --> I
+    RS --> I
     A1 & A2 & A3 & A4 -.implement.-> I
 ```
 
@@ -47,45 +50,47 @@ from its tables by enum.
 - Component names are enums the SDK owns; config can never name an import path.
 - The backend returns predictions plus a `ResultType`, so one array-based evaluator
   serves every backend and config needs no task-type field.
-- Splits are numpy-only domain logic on row ids, so a filtered, reloaded frame
-  re-selects exactly the recorded rows.
-- Every validation error names the config path and suggests a fix; the whole recipe,
-  including hyperparameter names and metric/model compatibility, is checked before IO.
-- Dataset identity is a content hash computed by the loader: file bytes for csv,
-  the canonical frame for library datasets. A loader backed by a dataset registry
-  such as DVC supplies the hash it already stores. A test against a different hash
-  is reported as leakage, because the recorded holdout ids no longer identify the
-  same rows.
+- Data operations (filter, split, folds, save) belong to datasets and are recorded by
+  row id, so a saved dataset can be reloaded and filtered by its own split.
+- Every validation error names the config path and suggests a fix; both graphs,
+  references, hyperparameter names, metric/model compatibility and paths are checked
+  before IO.
 
 ## Recipe
 
 | key | meaning |
 |-----|---------|
-| `runtime` | optional; which backend and artifact store run the recipe (recipe-wide, since a test must load a model with the backend that saved it) |
-| `datasets` | registry of named dataset definitions: `source: file` (csv) or `source: library` (scikit-learn bundled); optional id filter |
-| any other key | a section; its `type` (`train`, `test`, `eval`) selects the schema |
+| `runtime` | optional; which backend and artifact store run the recipe |
+| `datasets` | registry of named dataset specs: `source: file`, `library` or `dataset` (one saved by this tool), each with optional `filter`, `split`, `folds`, `seed`, `save_dataset` |
+| any other key | a node; its `type` (`dataset`, `train`, `test`, `eval`) selects the schema |
 
-Sections form a DAG. `depends_on` makes explicit edges. A section without
-`depends_on` is chained after the previously listed one with an implicit edge, so
-YAML order matters. Implicit edges only order execution; only explicit edges carry
-model and dataset inheritance, which is what lets a standalone test with a
-`model_path` sit after a train section without inheriting from it.
+Every node has a `datasets` list whose entries are references (`dataset_name`, to a
+registry entry or a dataset node) or inline specs (`name` plus the spec fields).
+Resolution is recursive and memoised per run. The entries are concatenated (row ids
+must be unique unless `ignore_duplicates`), then the node's root-level `filter`,
+`split`, `folds` apply to the result. A single entry keeps its own split and folds.
 
-| section | does | leaves behind |
-|---------|------|---------------|
-| `train` | split by row id, grid search when a param is a list (own loop, k-fold per candidate), refit the best, score the holdout | `model.joblib`, `model.json`, `dataset.json` (hash, train/holdout ids), `metrics.json`, `search_results.csv`, `candidates/`, `resolved_recipe.yaml`, `run.json` |
-| `test` | load a trained model, score rows, metrics if the target column is present | `predictions.csv`, `metrics.json`, `dataset.json` (what was scored, hash match) |
-| `eval` | stratified k-fold comparison of candidates | `eval_report.csv` (candidate × fold), `eval_summary.csv` (ranked), `folds.json` |
+| node | does | run card |
+|------|------|----------|
+| `dataset` | consolidate and save; runs when referenced or named with `--node` | `dataset.csv`, `metadata.json`, `train_ids.csv`, `test_ids.csv` |
+| `train` | fit on the train split (all rows without one); list-valued params are searched with k-fold CV over those rows; refit the best | `model.joblib`, `model.json`, `metrics.json`, `search_results.csv`, `candidates/` |
+| `test` | score every offered row with a model from an explicit `depends_on` or `model_path`; metrics if the target column is present | `predictions.csv`, `metrics.json`, `model.json` |
+| `eval` | compare candidates fold by fold using the folds recorded on the dataset | `eval_report.csv`, `eval_summary.csv`, `metrics.json` |
 
-Eval is model selection and never touches a recorded holdout; test is the one honest
-number on rows that were never used to fit or choose. Where a test gets its model and
-data:
+Every run card also holds `resolved_recipe.yaml`, `dataset_metadata.json` and
+`run.json`. Nothing is written without a `recipe_output`.
 
-| recipe says | model | data | rows | hash mismatch |
-|-------------|-------|------|------|---------------|
-| `depends_on: [train_x]`, no `datasets` | `train_x` | inherited from the model's `dataset.json` | `holdout` | refused (`--allow-dataset-mismatch` overrides) |
-| `model_path: …/latest`, no `datasets` | path | inherited | `holdout` | refused |
-| either, plus explicit `datasets` | as above | the given dataset | `all` | recorded, never refused |
+Two graphs decide the order. `depends_on` (train, test, eval only) forms the
+dependency graph; connected nodes run in topological order, nodes without edges are
+isolated and run afterwards in listing order. `dataset_name` references form the
+reference graph over dataset nodes; both must be acyclic. `--node X` runs X's
+transitive dependencies and then X; a dataset node as target is resolved and saved.
+
+Saving is explicit everywhere. A path that already holds a dataset is rebuilt with
+`overwrite: true`, loaded with `reuse: true`, and an error otherwise; a train, test or
+eval output path needs `overwrite: true` to be replaced. There is no versioning: to
+score only the rows a model never saw, save the dataset and filter the test's copy
+with `exclude: {split: train}`.
 
 ## Toolkit
 
@@ -96,13 +101,13 @@ root with a Makefile and submodules:
 intelligence-toolkit/              # root: Makefile, README, submodules
 ├── intelligence-services/         # FastAPI service layer: routes, connectors; hexagonal
 ├── intelligence-sdk/              # this repo: frameworks unified behind train / preprocess / predict
-├── intelligence-datasets/         # dataset access + versioning (the DVC-backed loader lives here)
+├── intelligence-datasets/         # dataset access + versioning (a DVC-backed loader lives here)
 ├── intelligence-inference-engine/ # C++ inference core over ONNX Runtime / OpenVINO / TensorRT, pybind11 to the SDK
 └── intelligence-iac/              # Terraform to deploy the stack onto Kubernetes
 ```
 
 The extension points are the ports: `ModelBackend` is where a torch backend or the
 inference engine's Python wrapper plugs in, `DataLoader` is where `intelligence-datasets`
-replaces the local csv and library loaders, and `ArtifactStore` is where an object
-store replaces the local directory. The services layer imports the same three facade
-names the CLI does.
+replaces the local loaders, and `ArtifactStore` is where an object store replaces
+the local directory. The services layer imports the same three facade names the
+CLI does.

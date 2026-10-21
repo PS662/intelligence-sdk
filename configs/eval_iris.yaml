@@ -1,27 +1,20 @@
 # Compare candidate models with stratified k-fold cross-validation.
-# Eval is model selection, not a final test: it never touches a recorded holdout.
+# Folds are a dataset operation; eval reads them from the dataset it is offered.
 
 datasets:
   iris_builtin:
     source: library                         # scikit-learn's bundled copy; no file needed
-    name: iris
+    dataset: iris
     target: species
+    folds:
+      k: 5
+      stratify: true
+    seed: 42
 
 compare:
   type: eval
   datasets:
-    # An entry is either a registry reference (dataset_name) or an inline
-    # definition (dataset) that extends the registry for this section only.
-    - dataset:
-        source: library
-        name: iris
-        target: species
-      filter:                               # reference-level filter, applied after the definition's
-        exclude: [0, 1]
-    # - dataset_name: iris_builtin          # the equivalent registry reference
-  folds: 5
-  stratify: true
-  seed: 42
+    - dataset_name: iris_builtin
   preprocessing:
     - step: standard_scaler
   candidates:
@@ -33,3 +26,6 @@ compare:
       params:
         n_neighbors: 5
   metrics: [accuracy, f1_macro]
+  recipe_output:
+    save_path: artifacts/compare
+    overwrite: true

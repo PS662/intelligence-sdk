@@ -10,6 +10,7 @@ from __future__ import annotations
 from intelligence_sdk.adapters.evaluator import DefaultEvaluator
 from intelligence_sdk.adapters.loaders.csv import CsvLoader
 from intelligence_sdk.adapters.loaders.library import LibraryLoader
+from intelligence_sdk.adapters.loaders.saved import SavedDatasetLoader
 from intelligence_sdk.adapters.local_artifacts import LocalArtifactStore
 from intelligence_sdk.adapters.sklearn_backend import SklearnBackend
 from intelligence_sdk.core.registry import ArtifactStoreKind, Backend
@@ -27,6 +28,7 @@ ARTIFACT_STORES: dict[ArtifactStoreKind, type[ArtifactStore]] = {
 LOADERS: dict[str, type[DataLoader]] = {
     "file": CsvLoader,
     "library": LibraryLoader,
+    "dataset": SavedDatasetLoader,
 }
 
 EVALUATOR: type[Evaluator] = DefaultEvaluator
