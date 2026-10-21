@@ -22,6 +22,21 @@ make inspect                     # validate a recipe and show roles and order wi
 make test lint                   # pytest, ruff
 ```
 
+The same commands without make, through the CLI script or the installed command:
+
+```bash
+python tools/make_iris_csv.py                                             # sample data
+python tools/intelligence_cli.py run     --recipe configs/train_iris.yaml
+python tools/intelligence_cli.py run     --recipe configs/test_iris.yaml
+python tools/intelligence_cli.py run     --recipe configs/eval_iris.yaml
+python tools/intelligence_cli.py run     --recipe configs/iris_dag.yaml
+python tools/intelligence_cli.py run     --recipe configs/iris_dag.yaml --node test_rf   # only test_rf and what it depends on
+python tools/intelligence_cli.py inspect --recipe configs/iris_dag.yaml
+python tools/intelligence_cli.py list-components --model random_forest
+
+intelligence-sdk run --recipe configs/train_iris.yaml                     # after `make install`, same subcommands
+```
+
 From Python the public surface is three names:
 
 ```python
