@@ -33,6 +33,7 @@ python tools/intelligence_cli.py run     --recipe configs/iris_dag.yaml
 python tools/intelligence_cli.py run     --recipe configs/iris_dag.yaml --node test_rf   # only test_rf and what it depends on
 python tools/intelligence_cli.py inspect --recipe configs/iris_dag.yaml
 python tools/intelligence_cli.py list-components --model random_forest
+python tools/intelligence_cli.py run     --recipe configs/train_iris_typo.yaml   # a recipe that fails on purpose, to see the errors
 
 intelligence-sdk run --recipe configs/train_iris.yaml                     # after `make install`, same subcommands
 ```

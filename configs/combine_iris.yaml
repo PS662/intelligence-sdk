@@ -1,0 +1,22 @@
+# A dataset node that combines iris with a copy of itself. Both copies carry
+# positional row ids 0 to 149, so the combine fails on duplicate ids and names the fix.
+# Run with --node combined (dataset nodes only run when referenced or targeted).
+
+datasets:
+  iris:
+    source: file
+    path: data/iris.csv
+    target: species
+  iris_copy:
+    source: file
+    path: data/iris.csv
+    target: species
+
+combined:
+  type: dataset
+  datasets:
+    - dataset_name: iris
+    - dataset_name: iris_copy
+  recipe_output:
+    save_path: data/derived/combined
+    overwrite: true

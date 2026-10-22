@@ -1,0 +1,34 @@
+# train_iris.yaml with overwrite removed from save_dataset. Run after train_iris.yaml:
+# data/derived/iris already holds a dataset, so the recipe has to say overwrite or reuse.
+
+datasets:
+  iris:
+    source: file
+    path: data/iris.csv
+    target: species
+    split:
+      test_size: 0.2
+      stratify: true
+    seed: 42
+    save_dataset:
+      path: data/derived/iris
+      overwrite: false
+
+train_rf:
+  type: train
+  datasets:
+    - dataset_name: iris
+  preprocessing:
+    - step: standard_scaler
+  model:
+    name: random_forest
+    params:
+      n_estimators: [20, 50]                # list -> search
+      max_depth: 3                          # scalar -> fixed
+  hyperparam_search:
+    cv: 3
+    scoring: accuracy
+  seed: 42
+  recipe_output:
+    save_path: artifacts/train_rf
+    overwrite: true
