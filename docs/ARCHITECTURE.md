@@ -8,37 +8,49 @@ dataset operations to it, acts, and writes a run card when it has a `recipe_outp
 
 ```mermaid
 flowchart LR
-    subgraph Consumer
-        CLI[tools/intelligence_cli.py]
+    CLI["tools/intelligence_cli.py"]
+
+    subgraph api ["facade and runtime"]
+        F["facade: load_recipe, run_recipe, build_runner"]
+        RT["runtime: providers, wired Runner"]
     end
-    subgraph SDK
-        F[facade<br/>load_recipe · run_recipe · build_runner]
-        RT[runtime/<br/>providers → wired Runner]
-        subgraph core
-            R[recipe.py<br/>schema + did-you-mean]
-            D[dag.py<br/>dependency + reference graphs]
-            RS[resolver.py<br/>recursive datasets, save policy]
-            RU[runner.py<br/>resolve → dataset / train / test / eval]
-            S[dataset_ops.py · splits.py]
-        end
-        subgraph interfaces
-            I[DataLoader · ModelBackend<br/>ArtifactStore · Evaluator]
-        end
-        subgraph adapters
-            A1[loaders: csv, library, saved]
-            A2[sklearn_backend]
-            A3[local_artifacts]
-            A4[evaluator]
-        end
+
+    subgraph domain ["core"]
+        R["recipe.py: schema, did-you-mean"]
+        D["dag.py: dependency and reference graphs"]
+        RS["resolver.py: recursive datasets, save policy"]
+        RU["runner.py: resolve, then dataset / train / test / eval"]
+        S["dataset_ops.py, splits.py"]
     end
-    CLI --> F --> RT
+
+    subgraph ports ["interfaces"]
+        I["DataLoader, ModelBackend, ArtifactStore, Evaluator"]
+    end
+
+    subgraph impl ["adapters"]
+        A1["loaders: csv, library, saved"]
+        A2["sklearn_backend"]
+        A3["local_artifacts"]
+        A4["evaluator"]
+    end
+
+    CLI --> F
+    F --> RT
     RT --> RU
-    RT --> A1 & A2 & A3 & A4
-    RU --> R & D & RS
+    RT --> A1
+    RT --> A2
+    RT --> A3
+    RT --> A4
+    RU --> R
+    RU --> D
+    RU --> RS
     RS --> S
     RU --> I
     RS --> I
-    A1 & A2 & A3 & A4 -.implement.-> I
+    A1 -. implements .-> I
+    A2 -. implements .-> I
+    A3 -. implements .-> I
+    A4 -. implements .-> I
 ```
 
 Imports flow one way: `tools → facade → runtime → {core, adapters} → interfaces → core/types`.
